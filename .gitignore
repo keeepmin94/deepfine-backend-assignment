@@ -1,0 +1,39 @@
+# Build outputs and local caches
+.gradle/
+**/build/
+out/
+
+# IDE and OS
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+.DS_Store
+Thumbs.db
+
+# Local configuration (keep safe examples)
+.env
+.env.*
+!.env.example
+application-local.yml
+application-local.yaml
+application-local.properties
+
+# Logs, diagnostics and local data
+*.log
+logs/
+*.hprof
+hs_err_pid*
+postgres-data/
+backups/
+
+# Private keys and local certificate stores
+*.pem
+*.key
+*.p12
+*.jks
+
+# Local implementation instructions, excluded from submission
+/docs/implementation-plan.md

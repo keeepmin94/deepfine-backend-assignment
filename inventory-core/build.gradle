@@ -1,0 +1,12 @@
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    integrationTestImplementation 'org.flywaydb:flyway-core'
+    integrationTestRuntimeOnly 'org.flywaydb:flyway-database-postgresql'
+    integrationTestRuntimeOnly 'org.postgresql:postgresql'
+}
+
+tasks.named('processIntegrationTestResources') {
+    from(project(':inventory-api').file('src/main/resources')) {
+        include 'db/migration/**'
+    }
+}

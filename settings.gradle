@@ -1,0 +1,3 @@
+rootProject.name = 'deepfine-inventory'
+
+include 'inventory-api', 'inventory-core'

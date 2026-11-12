@@ -1,0 +1,81 @@
+plugins {
+    id 'org.springframework.boot' version '3.3.0' apply false
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    group = 'com.deepfine.inventory'
+    version = '0.0.1-SNAPSHOT'
+
+    repositories {
+        mavenCentral()
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    sourceSets {
+        integrationTest {
+            compileClasspath += sourceSets.main.output
+            runtimeClasspath += sourceSets.main.output
+        }
+        e2eTest {
+            compileClasspath += sourceSets.main.output
+            runtimeClasspath += sourceSets.main.output
+        }
+    }
+
+    configurations {
+        integrationTestImplementation.extendsFrom testImplementation
+        integrationTestRuntimeOnly.extendsFrom testRuntimeOnly
+        e2eTestImplementation.extendsFrom testImplementation
+        e2eTestRuntimeOnly.extendsFrom testRuntimeOnly
+    }
+
+    dependencies {
+        implementation platform('org.springframework.boot:spring-boot-dependencies:3.3.0')
+        testImplementation 'org.springframework.boot:spring-boot-starter-test'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+        integrationTestImplementation 'org.testcontainers:junit-jupiter'
+        integrationTestImplementation 'org.testcontainers:postgresql'
+        e2eTestImplementation 'org.testcontainers:junit-jupiter'
+        e2eTestImplementation 'org.testcontainers:postgresql'
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.compilerArgs += '-parameters'
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
+        testLogging {
+            events 'failed', 'skipped'
+            exceptionFormat = 'full'
+        }
+    }
+
+    tasks.register('integrationTest', Test) {
+        description = 'Runs PostgreSQL integration tests.'
+        group = 'verification'
+        testClassesDirs = sourceSets.integrationTest.output.classesDirs
+        classpath = sourceSets.integrationTest.runtimeClasspath
+        shouldRunAfter tasks.named('test')
+    }
+
+    tasks.register('e2eTest', Test) {
+        description = 'Runs real HTTP tests with PostgreSQL.'
+        group = 'verification'
+        testClassesDirs = sourceSets.e2eTest.output.classesDirs
+        classpath = sourceSets.e2eTest.runtimeClasspath
+        shouldRunAfter tasks.named('integrationTest')
+    }
+
+    tasks.named('check') {
+        dependsOn tasks.named('integrationTest'), tasks.named('e2eTest')
+    }
+}
