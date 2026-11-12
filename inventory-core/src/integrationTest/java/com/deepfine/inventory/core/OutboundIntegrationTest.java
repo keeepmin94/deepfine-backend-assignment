@@ -4,6 +4,7 @@ import jakarta.persistence.EntityManagerFactory;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -81,6 +82,8 @@ class OutboundIntegrationTest {
     void removeFailureTrigger() {
         jdbc.execute("DROP TRIGGER IF EXISTS fail_outbound ON stock_movement");
         jdbc.execute("DROP FUNCTION IF EXISTS fail_outbound_after_flush()");
+        jdbc.execute("DROP TRIGGER IF EXISTS verify_mixed_movement ON stock_movement");
+        jdbc.execute("DROP FUNCTION IF EXISTS verify_mixed_movement()");
     }
 
     @Test
@@ -216,6 +219,21 @@ class OutboundIntegrationTest {
         assertStock("PRODUCT-A", 1, 4);
     }
 
+    @RepeatedTest(3)
+    void mixedInboundAndOutboundWithEnoughStockAllSucceed() throws Exception {
+        assertMixedScenario(100, 7, 11, 4, 4);
+    }
+
+    @RepeatedTest(3)
+    void mixedInboundCannotMakeOversizedOutboundSucceed() throws Exception {
+        assertMixedScenario(2, 1, 7, 0, 0);
+    }
+
+    @RepeatedTest(3)
+    void mixedScarceStockAccountsForOrderDependentSuccessesExactly() throws Exception {
+        assertMixedScenario(6, 1, 3, 2, 3);
+    }
+
     @Test
     void rowLockBlocksTheSameProductButNotQueriesOrOtherProducts() throws Exception {
         inbound("PRODUCT-A", 10);
@@ -271,21 +289,28 @@ class OutboundIntegrationTest {
     }
 
     private List<Outcome> concurrentlyOutbound(long quantity) throws Exception {
-        var ready = new CountDownLatch(8);
+        return concurrently(Collections.nCopies(8, new Operation(MovementType.OUTBOUND, quantity)));
+    }
+
+    private List<Outcome> concurrently(List<Operation> operations) throws Exception {
+        var ready = new CountDownLatch(operations.size());
         var start = new CountDownLatch(1);
-        var executor = Executors.newFixedThreadPool(8);
+        var executor = Executors.newFixedThreadPool(operations.size());
         var futures = new ArrayList<Future<Outcome>>();
         try {
-            for (int index = 0; index < 8; index++) {
+            for (Operation operation : operations) {
                 futures.add(executor.submit(() -> {
                     ready.countDown();
                     try {
                         if (!start.await(5, TimeUnit.SECONDS)) {
-                            throw new IllegalStateException("Outbound concurrent start timed out");
+                            throw new IllegalStateException("Stock operation concurrent start timed out");
                         }
-                        return new Outcome(outbound("PRODUCT-A", quantity), null);
+                        StockMovementResult result = operation.type() == MovementType.INBOUND
+                                ? stockService.inbound(new InboundCommand("PRODUCT-A", "상품", operation.quantity()))
+                                : outbound("PRODUCT-A", operation.quantity());
+                        return new Outcome(operation, result, null);
                     } catch (Exception exception) {
-                        return new Outcome(null, exception);
+                        return new Outcome(operation, null, exception);
                     }
                 }));
             }
@@ -293,11 +318,11 @@ class OutboundIntegrationTest {
             start.countDown();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
             var outcomes = new ArrayList<Outcome>();
-            for (Future<Outcome> future : futures) {
+            for (int index = 0; index < futures.size(); index++) {
                 try {
-                    outcomes.add(future.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS));
+                    outcomes.add(futures.get(index).get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS));
                 } catch (Exception exception) {
-                    outcomes.add(new Outcome(null, exception));
+                    outcomes.add(new Outcome(operations.get(index), null, exception));
                 }
             }
             return outcomes;
@@ -311,6 +336,68 @@ class OutboundIntegrationTest {
 
     private void inbound(String code, long quantity) {
         stockService.inbound(new InboundCommand(code, "상품", quantity));
+    }
+
+    private void assertMixedScenario(long initial, long inboundQuantity, long outboundQuantity,
+            int minimumOutboundSuccesses, int maximumOutboundSuccesses) throws Exception {
+        inbound("PRODUCT-A", initial);
+        long initialMovementId = jdbc.queryForObject("SELECT id FROM stock_movement", Long.class);
+        jdbc.execute("""
+                CREATE FUNCTION verify_mixed_movement() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    IF (SELECT quantity FROM inventory WHERE product_id = NEW.product_id) IS DISTINCT FROM NEW.quantity_after THEN
+                        RAISE EXCEPTION 'Movement does not match inventory at commit' USING ERRCODE = 'P0001';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$
+                """);
+        jdbc.execute("""
+                CREATE CONSTRAINT TRIGGER verify_mixed_movement AFTER INSERT ON stock_movement
+                DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION verify_mixed_movement()
+                """);
+        var operations = new ArrayList<Operation>();
+        for (int index = 0; index < 4; index++) {
+            operations.add(new Operation(MovementType.INBOUND, inboundQuantity));
+            operations.add(new Operation(MovementType.OUTBOUND, outboundQuantity));
+        }
+        var outcomes = concurrently(operations);
+        assertThat(outcomes).hasSize(8);
+        var inboundOutcomes = outcomes.stream().filter(outcome -> outcome.operation().type() == MovementType.INBOUND).toList();
+        var outboundSuccesses = outcomes.stream()
+                .filter(outcome -> outcome.operation().type() == MovementType.OUTBOUND && outcome.failure() == null).toList();
+        var failures = outcomes.stream().filter(outcome -> outcome.failure() != null).toList();
+        assertThat(inboundOutcomes).hasSize(4).allSatisfy(outcome -> assertThat(outcome.failure()).isNull());
+        assertThat(outboundSuccesses.size()).isBetween(minimumOutboundSuccesses, maximumOutboundSuccesses);
+        assertThat(failures).hasSize(4 - outboundSuccesses.size()).allSatisfy(outcome -> {
+            assertThat(outcome.operation().type()).isEqualTo(MovementType.OUTBOUND);
+            assertThat(outcome.failure()).isInstanceOfSatisfying(StockException.class,
+                    exception -> assertThat(exception.code()).isEqualTo(StockErrorCode.INSUFFICIENT_STOCK));
+            assertThat(outcome.result()).isNull();
+        });
+        long expectedQuantity = initial + 4 * inboundQuantity - outboundSuccesses.size() * outboundQuantity;
+        var movementIds = new ArrayList<Long>();
+        movementIds.add(initialMovementId);
+        for (Outcome outcome : outcomes) {
+            if (outcome.failure() == null) {
+                var result = outcome.result();
+                assertThat(result).isNotNull();
+                assertThat(result.movementType()).isEqualTo(outcome.operation().type());
+                assertThat(result.quantity()).isEqualTo(outcome.operation().quantity());
+                assertThat(result.quantityAfter()).isNotNegative();
+                var stored = jdbc.queryForMap("SELECT * FROM stock_movement WHERE id = ?", result.movementId());
+                assertThat(stored.get("movement_type")).isEqualTo(result.movementType().name());
+                assertThat(stored.get("quantity")).isEqualTo(result.quantity());
+                assertThat(stored.get("quantity_after")).isEqualTo(result.quantityAfter());
+                assertThat(((java.sql.Timestamp) stored.get("created_at")).toInstant()).isEqualTo(result.createdAt());
+                movementIds.add(result.movementId());
+            }
+        }
+        assertStock("PRODUCT-A", expectedQuantity, movementIds.size());
+        assertThat(jdbc.queryForList("SELECT id FROM stock_movement", Long.class))
+                .containsExactlyInAnyOrderElementsOf(movementIds);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM product", Long.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM inventory", Long.class)).isEqualTo(1);
     }
 
     private StockMovementResult outbound(String code, long quantity) {
@@ -335,6 +422,9 @@ class OutboundIntegrationTest {
                 """, Long.class, code)).isEqualTo(quantity);
     }
 
-    private record Outcome(StockMovementResult result, Exception failure) {
+    private record Operation(MovementType type, long quantity) {
+    }
+
+    private record Outcome(Operation operation, StockMovementResult result, Exception failure) {
     }
 }

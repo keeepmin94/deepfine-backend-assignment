@@ -1,5 +1,8 @@
 package com.deepfine.inventory.core;
 
+import java.math.BigInteger;
+import java.util.EnumSet;
+import java.util.Random;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -94,5 +97,41 @@ class InventoryTest {
         inventory.inbound(Long.MAX_VALUE);
         inventory.outbound(Long.MAX_VALUE);
         assertThat(inventory.getQuantity()).isZero();
+    }
+
+    @Test
+    void mixedBoundaryOperationsMatchAnIndependentBigIntegerModel() {
+        var inventory = new Inventory(1);
+        var random = new Random(20261112L);
+        var limit = BigInteger.valueOf(Long.MAX_VALUE);
+        var expected = BigInteger.ZERO;
+        var rejections = EnumSet.noneOf(StockErrorCode.class);
+        long[] quantities = {0, -1, Long.MIN_VALUE, 1, 2, 3, 100, Long.MAX_VALUE - 1, Long.MAX_VALUE};
+        int successes = 0;
+        for (int step = 0; step < 256; step++) {
+            long quantity = quantities[random.nextInt(quantities.length)];
+            boolean inbound = random.nextBoolean();
+            var delta = BigInteger.valueOf(quantity);
+            var candidate = inbound ? expected.add(delta) : expected.subtract(delta);
+            StockErrorCode rejection = quantity <= 0 ? StockErrorCode.INVALID_REQUEST
+                    : candidate.signum() < 0 ? StockErrorCode.INSUFFICIENT_STOCK
+                    : candidate.compareTo(limit) > 0 ? StockErrorCode.STOCK_LIMIT_EXCEEDED : null;
+            var updatedAt = inventory.getUpdatedAt();
+            Runnable operation = inbound ? () -> inventory.inbound(quantity) : () -> inventory.outbound(quantity);
+            if (rejection == null) {
+                operation.run();
+                expected = candidate;
+                successes++;
+            } else {
+                assertThatThrownBy(operation::run).isInstanceOfSatisfying(StockException.class,
+                        exception -> assertThat(exception.code()).isEqualTo(rejection));
+                assertThat(inventory.getUpdatedAt()).isEqualTo(updatedAt);
+                rejections.add(rejection);
+            }
+            assertThat(inventory.getQuantity()).isEqualTo(expected.longValueExact());
+        }
+        assertThat(successes).isPositive();
+        assertThat(rejections).containsExactlyInAnyOrder(StockErrorCode.INVALID_REQUEST,
+                StockErrorCode.INSUFFICIENT_STOCK, StockErrorCode.STOCK_LIMIT_EXCEEDED);
     }
 }

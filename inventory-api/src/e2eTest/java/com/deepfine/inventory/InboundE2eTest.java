@@ -165,7 +165,17 @@ class InboundE2eTest {
             "{\"productCode\":\"PRODUCT-A\",\"name\":\"  \",\"quantity\":1}",
             "{\"productCode\":\"PRODUCT-A\",\"name\":123,\"quantity\":1}",
             "{\"productCode\":\"PRODUCT-A\",\"name\":\"\\u0000\",\"quantity\":1}",
-            "{\"productCode\":\"PRODUCT-A\",\"name\":\"\\uD800\",\"quantity\":1}"
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"\\uD800\",\"quantity\":1}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"\\uDC00\",\"quantity\":1}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"상품\",\"quantity\":-9223372036854775809}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"상품\",\"quantity\":1e0}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"상품\",\"quantity\":[]}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":\"상품\",\"quantity\":{}}",
+            "{\"productCode\":1.5,\"name\":\"상품\",\"quantity\":1}",
+            "{\"productCode\":true,\"name\":\"상품\",\"quantity\":1}",
+            "{\"productCode\":\"\",\"name\":\"상품\",\"quantity\":1}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":1.5,\"quantity\":1}",
+            "{\"productCode\":\"PRODUCT-A\",\"name\":true,\"quantity\":1}"
     })
     void invalidInputReturns400AndLeavesNoRows(String json) throws Exception {
         assertError(post(json), 400, "INVALID_REQUEST");

@@ -178,7 +178,14 @@ class OutboundAndQueryE2eTest {
             "{\"productCode\":\" A\",\"quantity\":1}",
             "{\"productCode\":null,\"quantity\":1}",
             "{\"productCode\":123,\"quantity\":1}",
-            "{\"quantity\":1}"
+            "{\"quantity\":1}",
+            "{\"productCode\":\"PRODUCT-A\",\"quantity\":-9223372036854775809}",
+            "{\"productCode\":\"PRODUCT-A\",\"quantity\":1e0}",
+            "{\"productCode\":\"PRODUCT-A\",\"quantity\":[]}",
+            "{\"productCode\":\"PRODUCT-A\",\"quantity\":{}}",
+            "{\"productCode\":1.5,\"quantity\":1}",
+            "{\"productCode\":true,\"quantity\":1}",
+            "{\"productCode\":\"\",\"quantity\":1}"
     })
     void invalidOutboundInputReturns400AndPreservesStock(String json) throws Exception {
         seedStock(10);
@@ -208,6 +215,28 @@ class OutboundAndQueryE2eTest {
         assertThat(rejected.statusCode()).isEqualTo(400);
         assertThat(mapper.readTree(rejected.body()).path("code").asText()).isEqualTo("INVALID_REQUEST");
         assertState(1, 1);
+    }
+
+    @Test
+    void codeAndQuantityLimitsWorkTogetherAcrossAllThreeApis() throws Exception {
+        String code = "A".repeat(64);
+        assertThat(post("/api/v1/stock/inbounds", mapper.writeValueAsString(
+                new InboundPayload(code, "상품", Long.MAX_VALUE))).statusCode()).isEqualTo(201);
+        var rejectedInbound = post("/api/v1/stock/inbounds", mapper.writeValueAsString(
+                new InboundPayload(code + "A", "상품", 1)));
+        assertError(rejectedInbound, 400, "INVALID_REQUEST", "/api/v1/stock/inbounds");
+        var rejectedOutbound = post(OUTBOUND_PATH, mapper.writeValueAsString(
+                java.util.Map.of("productCode", code + "A", "quantity", 1)));
+        assertError(rejectedOutbound, 400, "INVALID_REQUEST", OUTBOUND_PATH);
+        assertState(Long.MAX_VALUE, 1);
+        var accepted = post(OUTBOUND_PATH, mapper.writeValueAsString(
+                java.util.Map.of("productCode", code, "quantity", Long.MAX_VALUE)));
+        assertThat(accepted.statusCode()).isEqualTo(201);
+        var query = getStock(code);
+        assertThat(query.statusCode()).isEqualTo(200);
+        assertThat(mapper.readTree(query.body()).path("productCode").asText()).isEqualTo(code);
+        assertThat(mapper.readTree(query.body()).path("quantity").asLong()).isZero();
+        assertState(0, 2);
     }
 
     @Test
