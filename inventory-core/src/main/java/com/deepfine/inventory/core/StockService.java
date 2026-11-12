@@ -9,16 +9,19 @@ public class StockService {
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
     private final StockMovementRepository movementRepository;
+    private final PostgresTransactionRepository transactionRepository;
 
     public StockService(ProductRepository productRepository, InventoryRepository inventoryRepository,
-            StockMovementRepository movementRepository) {
+            StockMovementRepository movementRepository, PostgresTransactionRepository transactionRepository) {
         this.productRepository = productRepository;
         this.inventoryRepository = inventoryRepository;
         this.movementRepository = movementRepository;
+        this.transactionRepository = transactionRepository;
     }
 
     @Transactional
     public StockMovementResult inbound(InboundCommand command) {
+        transactionRepository.applyLockTimeout();
         Product product = productRepository.findByProductCode(command.productCode()).orElse(null);
         if (product == null) {
             productRepository.insertIfAbsent(command.productCode(), command.name());
@@ -41,6 +44,7 @@ public class StockService {
 
     @Transactional
     public StockMovementResult outbound(OutboundCommand command) {
+        transactionRepository.applyLockTimeout();
         Product product = productRepository.findByProductCode(command.productCode())
                 .orElseThrow(() -> new StockException(StockErrorCode.PRODUCT_NOT_FOUND));
         Inventory inventory = inventoryRepository.findForUpdate(product.getId())

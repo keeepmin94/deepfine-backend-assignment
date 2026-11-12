@@ -1,6 +1,6 @@
 # DeepFine Backend Assignment — Inventory API
 
-재고 관리 MVP 과제입니다. 프로젝트 기반과 입고·출고·재고 조회 API를 구현했습니다. 요청 추적과 잠금 시간 초과 처리는 후속 단계입니다.
+재고 관리 MVP 과제입니다. 입고·출고·재고 조회 API, 요청 추적, 잠금 시간 초과·데드락 오류 분류를 구현했습니다. 혼합 동시 요청 보강과 애플리케이션 이미지·CI는 후속 단계입니다.
 
 ## 구현 범위
 
@@ -81,6 +81,7 @@ DB는 `postgres:16.14` 이미지를 사용하며 `pg_isready` healthcheck가 성
 | DB_PORT | 5432. DB 호스트 포트이며 127.0.0.1에만 바인딩합니다. |
 | DB_URL | jdbc:postgresql://localhost:5432/inventory |
 | SERVER_PORT | 8080 |
+| STOCK_LOCK_TIMEOUT_MS | 3000. 입출고 트랜잭션의 잠금 획득 대기 제한(ms). 양의 int 값만 허용합니다. |
 
 DB 이름은 `inventory`입니다. `DB_PORT` 변경 시 `DB_URL`의 포트도 맞춰야 합니다. DB 초기화 환경변수는 새 볼륨 생성 시 적용되므로 기존 볼륨의 사용자·비밀번호를 파일 수정만으로 바꿀 수는 없습니다.
 
@@ -122,7 +123,11 @@ curl -i -X POST http://localhost:8080/api/v1/stock/inbounds \
 - `quantity`: JSON 정수 1~Long.MAX_VALUE. 누락·null·0·음수·소수(`1.0` 포함)·범위 초과·숫자 문자열은 거부합니다. 상품 코드와 이름도 JSON 문자열이어야 합니다.
 - 이미 등록된 코드의 정규화된 상품명이 다르면 변경 없이 409입니다. 서로 다른 코드는 같은 이름을 사용할 수 있습니다.
 
-현재 오류 본문은 `code`, `message`, `path`이며 요청 추적용 `requestId`는 후속 단계에서 추가합니다.
+오류 본문은 `code`, `message`, `path`, `requestId`입니다. 서버가 요청마다 UUID를 생성하고 성공·실패 응답의 `X-Request-Id` 헤더와 관련 로그에 넣습니다. 클라이언트가 보낸 같은 이름의 헤더는 재사용하지 않습니다.
+
+```json
+{"code":"INSUFFICIENT_STOCK","message":"출고 가능한 재고가 부족합니다.","path":"/api/v1/stock/outbounds","requestId":"서버가 생성한 UUID"}
+```
 
 | 업무 오류 | HTTP | code |
 | --- | --- | --- |
@@ -131,9 +136,11 @@ curl -i -X POST http://localhost:8080/api/v1/stock/inbounds \
 | 등록된 상품명과 불일치 | 409 | PRODUCT_NAME_MISMATCH |
 | 출고 가능한 재고 부족 | 409 | INSUFFICIENT_STOCK |
 | 합산 재고 오버플로 | 409 | STOCK_LIMIT_EXCEEDED |
+| 잠금 획득 불가 (현재 경로의 잠금 대기 시간 초과) | 503 | STOCK_BUSY |
+| DB의 데드락 감지로 트랜잭션 중단 | 503 | TRANSACTION_RETRY_REQUIRED |
 | 재고 행 누락·예상하지 못한 서버/DB 오류 | 500 | INTERNAL_ERROR |
 
-지원하지 않는 메서드와 미디어 타입은 405·415를 유지합니다. 잠금 시간 초과·데드락의 503 세부 매핑은 아직 구현하지 않았으며 현재 일반 DB 오류는 500입니다. SQL·예외 이름·스택 트레이스를 오류 본문에 넣지 않습니다.
+지원하지 않는 메서드와 미디어 타입은 405·415를 유지합니다. DB 예외 체인과 JDBC nextException에서 SQLSTATE `55P03`·`40P01`만 위 503으로 분류하고, 제약 위반 등을 모두 재시도 가능한 오류로 취급하지 않습니다. 나머지 예상하지 못한 DB 오류는 500입니다. SQL·예외 이름·스택 트레이스를 오류 본문에 넣지 않습니다. 서버는 자동 재시도하지 않습니다.
 
 같은 상품을 3개 출고합니다. 예상 HTTP 상태는 `201`입니다.
 
@@ -181,7 +188,7 @@ java -version
 
 통합·E2E 테스트는 Testcontainers로 별도 `postgres:16.14` 컨테이너를 생성합니다. 실행 중인 개발 DB는 사용하지 않으며 Compose를 먼저 켤 필요가 없습니다. Docker를 사용할 수 없으면 테스트를 건너뛰지 않고 실패합니다.
 
-통합 테스트는 기반 스키마 검증 외에 입출고, 신규 등록 경쟁, 이름 충돌, 동시 입고·출고, 이력 실패 시 롤백, 단일 SELECT 조회와 행 잠금 분리를 검증합니다. E2E는 실제 HTTP 입고→출고→조회, 입력 경계, 400·404·409·500과 커밋 실패 응답을 DB 상태와 비교합니다. 혼합 입출고·동시 HTTP 변경·잠금 시간 초과는 아직 검증하지 않았습니다.
+통합 테스트는 입출고·신규 등록 경쟁·롤백·조회·행 잠금에 더해 기본 3초 제한과 동일 물리 연결의 설정 복원을 검증합니다. E2E는 HTTP 업무 흐름과 입력·업무 오류, 요청 ID, 실제 잠금 시간 초과·커밋 실패·데드락의 응답과 DB 상태를 검증합니다. 혼합 입출고·동시 HTTP 변경은 아직 검증하지 않았으며 병렬 HTTP 요청 ID 분리 검증과 구분합니다.
 
 `check`는 세 종류의 테스트 작업에 의존합니다. Core 통합 테스트는 API 모듈의 `db/migration/**`만 테스트 리소스로 복사합니다. DDL은 하나만 유지하고 Core 운영 코드가 API에 의존하지 않도록 합니다.
 
@@ -215,7 +222,7 @@ docker compose up -d --wait
 
 - DDL 기준은 `inventory-api/src/main/resources/db/migration/V1__create_inventory_schema.sql`입니다. 애플리케이션 기동 시 Flyway가 적용하며 Core 통합 테스트도 같은 파일을 사용합니다. DB Compose 단독 실행으로는 적용되지 않습니다.
 - JPA의 `ddl-auto=validate`는 엔티티와 스키마가 맞지 않으면 기동을 실패시킵니다. Product·Inventory·StockMovement 매핑을 실제 마이그레이션에 대조합니다. `open-in-view=false`로 응답 처리 중 DB 접근을 제한합니다.
-- DB 생성 시각은 `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`를 사용해 네이티브 상품·재고 INSERT에도 채웁니다. 이 기본값이 없으면 시각을 생략한 INSERT는 NOT NULL 제약으로 실패합니다. 대안은 모든 INSERT에서 시각을 명시하는 방식입니다. `CURRENT_TIMESTAMP`는 트랜잭션 시작 시각이며 커밋 순서를 뜻하지 않습니다. 수정 시각 자동 갱신 트리거는 없으며 재고 엔티티의 입고 메서드가 `updatedAt`을 갱신합니다. 이력의 `createdAt`은 JPA 저장 전 애플리케이션에서 채웁니다. JDBC의 시각 변환 기준은 UTC입니다.
+- DB 생성 시각은 `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`를 사용해 네이티브 상품·재고 INSERT에도 채웁니다. 이 기본값이 없으면 시각을 생략한 INSERT는 NOT NULL 제약으로 실패합니다. 대안은 모든 INSERT에서 시각을 명시하는 방식입니다. `CURRENT_TIMESTAMP`는 트랜잭션 시작 시각이며 커밋 순서를 뜻하지 않습니다. 수정 시각 자동 갱신 트리거는 없으며 재고 엔티티의 입출고 메서드가 `updatedAt`을 갱신합니다. 이력의 `createdAt`은 JPA 저장 전 애플리케이션에서 채웁니다. JDBC의 시각 변환 기준은 UTC입니다.
 - FK는 참조 무결성만 보장합니다. 입고 서비스가 신규 상품·재고·이력을 한 트랜잭션으로 생성합니다. 기존 상품의 재고 누락은 500으로 처리하며 자동 복구하지 않습니다.
 - 새로 clone한 환경에서 환경 파일 복사 → Compose 빌드·실행 → API 호출 → 테스트 실행을 검증합니다.
 - 재시작 후 DB 데이터 유지 여부와 종료 절차를 확인합니다.
@@ -305,7 +312,36 @@ GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
 - DB 지연 트리거로 재고 UPDATE 이후 출고 이력의 커밋을 실패시켜 수량·수정 시각·이력 롤백을 확인합니다. 실제 HTTP에서도 커밋 실패가 201이 아닌 500이며 부분 저장이 없는지 확인합니다.
 - HTTP 입고→출고→조회, 전량 출고, Long.MAX_VALUE 전량 출고, 재고 부족 409, 상품 없음 404, 재고 누락 500, JSON 타입·수량·경로 코드 검증과 UTC 시각을 검사합니다.
 
-미검증 범위는 요청 추적, 잠금 시간 초과·데드락 분류와 응답, 혼합 입출고·동시 HTTP 변경, 애플리케이션 이미지·CI와 새 clone의 전체 실행입니다. 새 라이브러리·트랜잭션 전파 옵션·스키마 변경은 없습니다.
+3단계 완료 당시의 미검증 범위는 요청 추적, 잠금 시간 초과·데드락 분류와 응답, 혼합 입출고·동시 HTTP 변경, 애플리케이션 이미지·CI와 새 clone의 전체 실행입니다. 3단계에는 새 라이브러리·트랜잭션 전파 옵션·스키마 변경을 추가하지 않았습니다. 요청 추적과 잠금 오류의 후속 검증은 4단계 기록에 구분합니다.
+
+### 11. 4단계 검증 기록 (2026-11-12)
+
+환경과 DB 마이그레이션은 이전 단계와 동일합니다. 관련 단위·잠금 통합·HTTP 테스트를 개별 실행한 뒤 필터 없는 전체 검증을 실행했습니다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon check :inventory-api:bootJar
+```
+
+결과는 BUILD SUCCESSFUL입니다. 최종 검증은 단위 테스트의 변경 없는 결과를 재사용했고, PostgreSQL 통합·실제 HTTP 테스트 전체와 JAR 생성을 수행했습니다. 아래 집계는 이전 단계를 포함합니다.
+
+| 종류 | 결과 |
+| --- | --- |
+| 단위 | 67건 성공 (Core 49, API 18) |
+| PostgreSQL 통합 | 51건 성공 (스키마 13, 입고 18, 출고·조회 15, 잠금 설정·시간 초과 4, API 기동 1) |
+| 실제 HTTP E2E | 73건 성공 (기동 1, 입고 32, 출고·조회 31, 요청 추적·시간 초과 6, 데드락 3) |
+| 합계 | 191건, 최종 실패·오류·건너뜀 0건 |
+| 실행 JAR | 생성 성공. 애플리케이션 이미지·전체 Compose는 후속 단계 |
+
+- 기본 3초 설정은 실제 트랜잭션에서 `SHOW lock_timeout`으로 확인합니다. 업무 풀 크기 1에서 커밋·롤백·실제 시간 초과 후 같은 `pg_backend_pid()` 연결이 재사용되고 설정이 0으로 돌아오는지 검증합니다. 행 잠금과 신규 등록 UNIQUE 충돌의 `55P03`도 확인하며, 명시적인 다음 요청만 성공 이력을 추가합니다.
+- 위 테스트는 최초 기동에서 Flyway가 추가 마이그레이션 연결을 얻지 못해 4건 실패했습니다. 테스트에 한해 Flyway를 같은 PostgreSQL·같은 DDL의 별도 연결로 실행하도록 수정했습니다. 업무 풀 크기 1과 동일 물리 연결 확인을 유지했고 테스트를 비활성화하거나 기대값을 낮추지 않았습니다.
+- HTTP 시간 초과 검증은 테스트 설정 250ms를 사용합니다. 행 잠금·신규 등록 충돌뿐 아니라 재고 UPDATE 후 커밋 단계의 잠금 시간 초과를 유도하고, 503·수량·수정 시각·이력 롤백과 명시적 재요청을 검증합니다. 운영 기본 3초 검증은 위 Core 테스트와 구분합니다.
+- 실제 데드락 HTTP 테스트는 각 실행에서 3회 반복합니다. 테스트 전용 트리거가 두 번째 상품 잠금을 요청하게 하고, advisory 게이트와 `pg_blocking_pids`로 대기를 조율해 실제 순환 대기를 만듭니다. DB가 발생시킨 `40P01`이 HTTP 503·TRANSACTION_RETRY_REQUIRED로 변환되고 전체가 롤백되는지 확인합니다. 테스트의 HTTP 잠금 제한은 10초, 외부 경쟁 연결의 트랜잭션 한정 deadlock_timeout은 1시간으로 설정해 HTTP 측 감지기가 먼저 중단하도록 조율합니다. 실제로 1시간을 기다리는 테스트가 아니며 Future·대기·종료에는 별도 제한이 있습니다. 이 트리거·게이트·감지 설정은 운영 코드에 없습니다.
+- 요청 추적 단위 테스트는 정상·예외 종료의 MDC 복원을 검증합니다. HTTP에서는 시작 래치로 조율한 병렬 8개 요청의 헤더·오류 본문·완료 로그 ID가 각각 일치하고 중복되지 않는지 확인합니다. 같은 입고 본문을 두 번 보내면 ID도 새로 생기고 이력도 두 건인 것을 확인합니다.
+- 제약 위반의 500 응답과 SQL·내부 정보 비노출을 유지합니다. SQLSTATE 분류 단위 테스트는 다른 DB 오류를 503으로 바꾸지 않는지도 검사합니다.
+
+미검증 범위는 혼합 입출고·동시 HTTP 변경의 정합성 보강, 애플리케이션 이미지·CI와 새 clone의 전체 실행입니다. 운영 성능이나 정상 단일 상품 경로의 데드락 발생 빈도를 측정한 것은 아닙니다. 새 라이브러리·자동 재시도·트랜잭션 전파 옵션·운영 스키마 변경은 추가하지 않았습니다.
 
 ## 입고 처리와 트랜잭션
 
@@ -320,7 +356,7 @@ JPA 엔티티는 `@Entity`·`@Table`·`@Column`으로 DDL과 매핑하고 IDENTI
 
 유일성 오류를 잡고 같은 트랜잭션을 계속 사용하는 대안은 PostgreSQL의 실패한 트랜잭션 상태를 해결하지 못합니다. 별도 트랜잭션 재시도나 낙관적 잠금도 대안이지만 충돌 처리·재시도 정책이 필요합니다. 현재는 UNIQUE와 충돌 무시 INSERT, 재고 행 잠금으로 조율합니다. 상품·재고를 합치면 생성과 JOIN 비용은 줄지만 현재 합의한 책임 분리를 유지합니다.
 
-현재 잠금 대기 시간 제한은 애플리케이션에서 설정하지 않습니다. 3초 후보값의 트랜잭션 범위 `lock_timeout`과 503 응답 검증은 후속 단계에서 추가합니다. 커밋 이후 응답 유실은 롤백되지 않으며 요청 재전송도 별도 입고입니다.
+입출고는 트랜잭션 시작 직후 `lock_timeout`을 적용합니다. 기본 3초는 초기 후보값이며 측정한 최적값이 아닙니다. 아래 설정 설명과 검증 범위를 참고합니다. 커밋 이후 응답 유실은 롤백되지 않으며 요청 재전송도 별도 입고입니다.
 
 ## 출고와 조회 설계
 
@@ -333,6 +369,18 @@ JPA 엔티티는 `@Entity`·`@Table`·`@Column`으로 DDL과 매핑하고 IDENTI
 엔티티 관계를 추가하지 않고 [Hibernate의 명시적 엔티티 조인](https://docs.hibernate.org/orm/6.5/querylanguage/html_single/#explicit-root-joins)을 사용하므로 이 구문은 현재 Hibernate 지원에 의존합니다. 대안은 JPA 연관관계 매핑 또는 SQL 프로젝션입니다. 상품·재고를 두 개의 별도 SELECT로 조회하면 READ COMMITTED에서 서로 다른 시점의 데이터를 조합할 수 있으므로 단일 SELECT로 유지합니다.
 
 조회에 쓰기 잠금이나 별도 트랜잭션 옵션은 없습니다. 일반 SELECT는 커밋된 스냅샷을 읽으며 [PostgreSQL의 행 잠금](https://www.postgresql.org/docs/16/explicit-locking.html#LOCKING-ROWS)이 보유된 동안에도 실행할 수 있습니다. DDL 등 더 강한 테이블 잠금까지 어떤 상황에서도 기다리지 않는다는 뜻은 아닙니다. 조회의 추가 트랜잭션이 없어도 단일 SELECT의 스냅샷 일관성을 이용할 수 있습니다.
+
+## 요청 추적과 잠금 오류
+
+`RequestIdFilter`는 높은 우선순위의 `OncePerRequestFilter`로 동기 MVC 처리 전 요청 ID를 생성합니다. ID는 요청 속성·응답 헤더·MDC에 넣습니다. 오류 응답은 같은 요청 속성에서 ID를 읽고, 로그 패턴은 MDC의 ID를 출력합니다. 요청 종료·예외 발생 모두 `finally`에서 이전 MDC 전체를 복원하며 기존 컨텍스트가 없으면 비웁니다. 응답 코드·메서드·경로를 기록하고 요청 본문 전체나 쿼리 문자열은 기록하지 않습니다. 애플리케이션의 예상하지 못한 오류 스택은 예외 처리 계층에서 기록하며, 분류한 잠금 오류는 코드만 경고 로그로 남깁니다.
+
+요청 ID를 클라이언트 입력 그대로 신뢰하는 대안 대신 서버에서 매번 생성합니다. 같은 업무 요청을 다시 보내도 새 ID가 생기고 별도 입출고로 처리됩니다. ID를 멱등성 키나 처리 결과 조회 기능으로 사용하지 않습니다. 현재 검증 범위는 동기 MVC API이며 비동기 작업의 MDC 전파 기능은 추가하지 않았습니다.
+
+`PostgresTransactionRepository`는 `@Value`로 양의 밀리초 설정을 주입받습니다. 기본값은 3000이며 0·음수 또는 int 범위 밖의 설정은 정상 기동할 수 없습니다. Service의 기존 트랜잭션 안에서 첫 SQL로 `SELECT set_config('lock_timeout', :timeout, true)`를 실행하고 값을 바인딩합니다. 별도의 전파 옵션이나 트랜잭션은 만들지 않습니다. `true`는 [현재 트랜잭션에만 설정을 적용](https://www.postgresql.org/docs/16/functions-admin.html)하므로 커밋·롤백 후 원래 값으로 복원됩니다. 이 Repository 호출을 트랜잭션 밖으로 옮기면 설정이 다음 업무 SQL까지 유지되지 않으므로 현재 호출 위치가 중요합니다.
+
+이 제한은 신규 상품 UNIQUE 충돌을 포함한 [각 잠금 획득 시도의 대기](https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-LOCK-TIMEOUT)에 적용됩니다. SQL의 전체 실행 시간, 연결 풀 대기 또는 HTTP 전체 응답 시간 제한이 아닙니다. 대안인 세션 범위 SET은 풀 연결 재사용 시 설정이 남을 수 있고, statement_timeout은 잠금 외의 SQL 실행 시간도 포함해 의미가 다릅니다. 현재는 트랜잭션 범위의 잠금 제한을 선택했습니다.
+
+예외 메시지 문구나 모든 DataAccessException을 기준으로 분류하지 않습니다. [PostgreSQL SQLSTATE](https://www.postgresql.org/docs/16/errcodes-appendix.html) `55P03`은 lock_not_available이고 현재 입출고 경로에서는 잠금 대기 시간 초과로 재현합니다. `40P01`은 deadlock_detected입니다. 실제 Spring/JPA 예외의 cause와 JDBC nextException을 따라 이 두 상태만 각각 STOCK_BUSY·TRANSACTION_RETRY_REQUIRED로 변환합니다. 나머지 DB 오류는 INTERNAL_ERROR로 유지합니다.
 
 ## 범위와 한계
 

@@ -45,7 +45,7 @@ class OutboundIntegrationTest {
     @EnableAutoConfiguration
     @EntityScan(basePackageClasses = Product.class)
     @EnableJpaRepositories(basePackageClasses = ProductRepository.class)
-    @Import({StockService.class, InventoryQueryService.class})
+    @Import({StockService.class, InventoryQueryService.class, PostgresTransactionRepository.class})
     static class TestApplication {
     }
 

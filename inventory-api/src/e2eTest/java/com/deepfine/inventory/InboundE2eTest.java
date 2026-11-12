@@ -243,6 +243,7 @@ class InboundE2eTest {
         assertThat(body.path("code").asText()).isEqualTo(code);
         assertThat(body.path("message").asText()).isNotBlank();
         assertThat(body.path("path").asText()).isEqualTo(PATH);
+        assertThat(body.path("requestId").asText()).isEqualTo(response.headers().firstValue("X-Request-Id").orElseThrow());
     }
 
     private void assertState(long quantity, long movements) {

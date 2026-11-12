@@ -22,23 +22,24 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(StockException.class)
     ResponseEntity<Object> handleStockException(StockException exception, HttpServletRequest request) {
-        HttpStatus status = switch (exception.code()) {
-            case INVALID_REQUEST -> HttpStatus.BAD_REQUEST;
-            case PRODUCT_NOT_FOUND -> HttpStatus.NOT_FOUND;
-            case PRODUCT_NAME_MISMATCH, STOCK_LIMIT_EXCEEDED, INSUFFICIENT_STOCK -> HttpStatus.CONFLICT;
-            case INTERNAL_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR;
-        };
+        HttpStatus status = status(exception.code());
         if (status.is5xxServerError()) {
             LOG.error("Stock operation failed", exception);
+        } else {
+            LOG.warn("Stock request rejected code={}", exception.code());
         }
-        return ResponseEntity.status(status).body(error(exception.code(), request.getRequestURI()));
+        return ResponseEntity.status(status).body(error(exception.code(), request));
     }
 
     @ExceptionHandler(Exception.class)
     ResponseEntity<Object> handleUnexpectedException(Exception exception, HttpServletRequest request) {
-        LOG.error("Unhandled request failure", exception);
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(error(StockErrorCode.INTERNAL_ERROR, request.getRequestURI()));
+        StockErrorCode code = DatabaseFailureClassifier.classify(exception);
+        if (code == StockErrorCode.INTERNAL_ERROR) {
+            LOG.error("Unhandled request failure", exception);
+        } else {
+            LOG.warn("Database transaction rejected code={}", code);
+        }
+        return ResponseEntity.status(status(code)).body(error(code, request));
     }
 
     @Override
@@ -46,11 +47,22 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
             HttpHeaders headers, HttpStatusCode statusCode, WebRequest request) {
         StockErrorCode code = statusCode.is4xxClientError()
                 ? StockErrorCode.INVALID_REQUEST : StockErrorCode.INTERNAL_ERROR;
-        String path = ((ServletWebRequest) request).getRequest().getRequestURI();
-        return super.handleExceptionInternal(exception, error(code, path), headers, statusCode, request);
+        var servletRequest = ((ServletWebRequest) request).getRequest();
+        return super.handleExceptionInternal(exception, error(code, servletRequest), headers, statusCode, request);
     }
 
-    private ApiError error(StockErrorCode code, String path) {
-        return new ApiError(code.name(), code.message(), path);
+    private HttpStatus status(StockErrorCode code) {
+        return switch (code) {
+            case INVALID_REQUEST -> HttpStatus.BAD_REQUEST;
+            case PRODUCT_NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case PRODUCT_NAME_MISMATCH, STOCK_LIMIT_EXCEEDED, INSUFFICIENT_STOCK -> HttpStatus.CONFLICT;
+            case STOCK_BUSY, TRANSACTION_RETRY_REQUIRED -> HttpStatus.SERVICE_UNAVAILABLE;
+            case INTERNAL_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR;
+        };
+    }
+
+    private ApiError error(StockErrorCode code, HttpServletRequest request) {
+        return new ApiError(code.name(), code.message(), request.getRequestURI(),
+                (String) request.getAttribute(RequestIdFilter.ATTRIBUTE));
     }
 }

@@ -20,3 +20,10 @@ spring:
 
 server:
     port: ${SERVER_PORT:8080}
+
+inventory:
+    lock-timeout-ms: ${STOCK_LOCK_TIMEOUT_MS:3000}
+
+logging:
+    pattern:
+        level: "%5p [requestId=%X{requestId:-}]"
