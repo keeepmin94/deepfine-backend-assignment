@@ -5,6 +5,7 @@ import com.deepfine.inventory.api.dto.request.OutboundRequest;
 import com.deepfine.inventory.api.dto.response.MovementResponse;
 import com.deepfine.inventory.core.service.StockService;
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -14,13 +15,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 @RestController
 @RequestMapping("/api/v1/stock")
+@RequiredArgsConstructor
 public class StockController {
 
     private final StockService stockService;
-
-    public StockController(StockService stockService) {
-        this.stockService = stockService;
-    }
 
     @PostMapping("/inbounds")
     public ResponseEntity<MovementResponse> inbound(@Valid @RequestBody InboundRequest request) {

@@ -12,24 +12,18 @@ import com.deepfine.inventory.core.repository.InventoryRepository;
 import com.deepfine.inventory.core.repository.PostgresTransactionRepository;
 import com.deepfine.inventory.core.repository.ProductRepository;
 import com.deepfine.inventory.core.repository.StockMovementRepository;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
+@RequiredArgsConstructor
 public class StockService {
 
     private final ProductRepository productRepository;
     private final InventoryRepository inventoryRepository;
     private final StockMovementRepository movementRepository;
     private final PostgresTransactionRepository transactionRepository;
-
-    public StockService(ProductRepository productRepository, InventoryRepository inventoryRepository,
-            StockMovementRepository movementRepository, PostgresTransactionRepository transactionRepository) {
-        this.productRepository = productRepository;
-        this.inventoryRepository = inventoryRepository;
-        this.movementRepository = movementRepository;
-        this.transactionRepository = transactionRepository;
-    }
 
     @Transactional
     public StockMovementResult inbound(InboundCommand command) {

@@ -249,3 +249,29 @@ Compose 검증도 성공 종료했습니다. 기반 이미지·Wrapper 입력 �
 새 격리 볼륨에 PostgreSQL 16.14·Flyway V1이 적용됐고, 실제 HTTP 입고 10·출고 3·조회 7·초과 출고 409와 요청 ID를 확인했습니다. 상품·재고 각 1행, 성공 이력 2행 및 이력 합계 7을 검사했습니다. DB·API 재시작과 `down` → `up` 후 같은 HTTP·DB 상태를 확인한 뒤 고유 검증 프로젝트의 컨테이너·네트워크·볼륨만 정리했습니다.
 
 이번 패키지 변경 후 전체 테스트는 macOS Java 21.0.12.1에서, 이미지 빌드·Compose는 Linux ARM64 Temurin 21.0.13+9에서 검증했습니다. Linux 컨테이너에서 전체 테스트를 다시 실행하거나 원격 CI·AMD64·새 원격 clone을 검증한 것은 아닙니다. DB 스키마·HTTP 계약·업무 규칙·트랜잭션 옵션·의존성은 변경하지 않았고 원격 push도 하지 않았습니다.
+
+### 16. Lombok 생성자 주입 정리 검증 (2026-11-12)
+
+사용자의 요청으로 컨트롤러 2개(StockController·ProductController), 서비스 2개(StockService·InventoryQueryService)에 RequiredArgsConstructor를 적용하고 반복 대입 생성자를 제거했습니다. private final 의존성 필드와 업무 메서드는 유지했습니다. PostgresTransactionRepository는 Value 설정 주입·양수 검사·단위 변환이 있는 명시적 생성자를 유지하고, 엔티티·예외·record의 생성자는 변경하지 않았습니다.
+
+공통 Gradle 설정에 compileOnly Lombok과 annotationProcessor Lombok을 추가했습니다. 두 모듈의 processor 구성에도 기존 Spring Boot 3.3.0 BOM을 적용합니다. 별도 Lombok 버전 지정이나 Gradle 플러그인은 추가하지 않았습니다. dependencyInsight로 두 모듈의 annotationProcessor가 BOM 제약에 따라 1.18.32로 해결되고, runtimeClasspath에는 Lombok이 없음을 각각 확인했습니다. 실행 JAR에도 Lombok 항목이 없으며 javap로 네 클래스의 생성자가 생성된 것을 확인했습니다.
+
+전체 실행 명령:
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon clean check :inventory-api:bootJar
+```
+
+macOS ARM64 / Homebrew Java 21.0.12.1 / Gradle 8.8, Docker Engine 24.0.2 / Compose 2.18.1, PostgreSQL 16.14 Linux ARM64에서 BUILD SUCCESSFUL, 1분 50초, actionable task 19개 모두 실행을 확인했습니다. XML 집계는 단위 68·DB 통합 60·실제 HTTP E2E 103, 합계 231건이며 실패·오류·건너뜀 0건입니다. 테스트·기대값은 변경하지 않았으며 실제 서버 기동과 업무 흐름으로 생성자 주입 동작을 확인했습니다.
+
+```bash
+./scripts/verify-compose.sh
+```
+
+위 Compose 검증도 성공 종료했습니다. 변경한 build.gradle과 소스를 이미지에 복사해 Linux ARM64 / Temurin JDK 21.0.13+9에서 Lombok 생성자 처리와 bootJar 빌드를 다시 수행했습니다. 이미지 내부 빌드는 BUILD SUCCESSFUL, 6개 actionable task 모두 실행됐고 Temurin JRE 21.0.13+9로 API가 기동했습니다. 기반 이미지 캐시는 사용했으며 호스트 빌드 결과는 Docker 컨텍스트에서 제외했습니다.
+
+새 격리 PostgreSQL 16.14의 Flyway V1 적용, 입고 10 → 출고 3 → 조회 7, 초과 출고 409, 요청 ID를 확인했습니다. 상품·재고 각 1행과 성공 이력 2행·합계 7을 검사하고 DB·API 재시작 및 컨테이너 재생성 후 같은 상태를 확인했습니다. 검증 프로젝트 자원을 정리하고 기존 Docker 볼륨은 보존했습니다.
+
+원격 CI·AMD64·현재 코드의 새 원격 clone은 미검증입니다. Linux 컨테이너에서 전체 테스트를 다시 실행한 것은 아니며, 호스트의 전체 테스트와 이미지 빌드·Compose 실행을 구분합니다. 이번 변경은 생성자 반복 제거와 필요한 컴파일 의존성 추가이며 HTTP 계약·DB 스키마·업무 규칙·트랜잭션 옵션은 변경하지 않았습니다. 원격 push는 하지 않았습니다.

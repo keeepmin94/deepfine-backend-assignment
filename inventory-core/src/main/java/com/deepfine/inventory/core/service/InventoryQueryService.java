@@ -5,16 +5,14 @@ import com.deepfine.inventory.core.enums.StockErrorCode;
 import com.deepfine.inventory.core.exception.StockException;
 import com.deepfine.inventory.core.repository.ProductRepository;
 import com.deepfine.inventory.core.validator.ProductCodeValidator;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 @Service
+@RequiredArgsConstructor
 public class InventoryQueryService {
 
     private final ProductRepository productRepository;
-
-    public InventoryQueryService(ProductRepository productRepository) {
-        this.productRepository = productRepository;
-    }
 
     public StockSnapshot getStock(String productCode) {
         ProductCodeValidator.requireValid(productCode);

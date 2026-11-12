@@ -12,7 +12,7 @@
 
 ## 기술 및 구조
 
-Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL)를 사용합니다. Flyway 10.10.0과 Testcontainers 1.19.8을 포함한 의존성 버전은 Spring Boot BOM으로 관리합니다.
+Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL)를 사용합니다. Flyway 10.10.0, Testcontainers 1.19.8, Lombok 1.18.32를 포함한 의존성 버전은 Spring Boot BOM으로 관리합니다.
 
 - inventory-api: HTTP 요청·응답, 검증, 예외 처리, 애플리케이션 실행
 - inventory-core: 상품·재고 규칙, 입출고 처리, 영속성
@@ -21,6 +21,10 @@ Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL
 - stock_movement: 성공한 입출고 이력
 
 Gradle 의존성은 `inventory-api → inventory-core`입니다. 모듈을 나누지만 실행 애플리케이션과 DB는 각각 하나입니다. Controller는 HTTP 경계, Service는 트랜잭션 조율, Entity는 재고 규칙, Repository는 DB 접근을 담당합니다. Core는 JPA에 의존하며 HTTP DTO·상태 코드는 API 모듈에 둡니다. 구체적인 필요가 없는 서비스 인터페이스나 도메인·영속성 모델 중복은 만들지 않았습니다.
+
+컨트롤러 2개와 서비스 2개는 `private final` 의존성 필드와 Lombok의 [RequiredArgsConstructor](https://projectlombok.org/features/constructor)로 생성자 주입을 구성합니다. 컴파일 때 필드 순서대로 생성자를 만들어 반복 대입 코드를 줄입니다. 직접 생성자를 작성하는 것도 같은 주입 방식의 대안입니다. Lombok은 `compileOnly`와 `annotationProcessor`에만 추가하며, 별도 구성인 annotationProcessor에도 같은 Boot BOM을 적용합니다. processor 설정이 없으면 생성자가 만들어지지 않아 현재 final 필드를 초기화하는 코드가 컴파일되지 않습니다. 실행 시 Lombok JAR는 필요하지 않습니다.
+
+`PostgresTransactionRepository`는 생성자에서 `@Value` 설정 주입·양수 검사·밀리초 단위 문자열 변환을 수행하므로 명시적 생성자를 유지합니다. 이를 단순 자동 생성자로 대체하면 같은 초기화 동작이 보존되지 않습니다. JPA 엔티티·예외·record의 생성자는 각각의 생성·검증 책임을 유지합니다.
 
 Java 파일은 역할별 하위 패키지로 분류합니다. 아래 경로는 API의 `com.deepfine.inventory.api`, Core의 `com.deepfine.inventory.core` 아래를 기준으로 하며 파일명에서 `.java`는 생략했습니다.
 
@@ -297,14 +301,14 @@ DDL 기준은 [V1__create_inventory_schema.sql](inventory-api/src/main/resources
 
 ### 8. 검증 결과와 실행 범위
 
-최신 전체 테스트는 역할별 패키지 정리 후 `./gradlew --no-daemon clean check :inventory-api:bootJar`로 실행했습니다. macOS ARM64 / Homebrew Java 21.0.12.1, PostgreSQL 16.14 Linux ARM64에서 단위 68건·DB 통합 60건·실제 HTTP E2E 103건, **총 231건 성공**, 실패·오류·건너뜀 0건입니다. 19개 actionable task가 모두 실행됐고 실행 JAR도 생성했습니다. 패키지 정리 전 6단계에는 Linux ARM64 / Temurin 21.0.13+9에서도 전체 테스트를 수행했으며 당시 결과는 검증 기록에 구분합니다.
+최신 전체 테스트는 Lombok 생성자 주입 적용 후 `./gradlew --no-daemon clean check :inventory-api:bootJar`로 실행했습니다. macOS ARM64 / Homebrew Java 21.0.12.1, PostgreSQL 16.14 Linux ARM64에서 단위 68건·DB 통합 60건·실제 HTTP E2E 103건, **총 231건 성공**, 실패·오류·건너뜀 0건입니다. 19개 actionable task가 모두 실행됐고 실행 JAR도 생성했습니다. 패키지 정리 전 6단계에는 Linux ARM64 / Temurin 21.0.13+9에서도 전체 테스트를 수행했으며 당시 결과는 검증 기록에 구분합니다.
 
 | 구분 | 확인한 범위 | 한계 |
 | --- | --- | --- |
 | 단위 | 입력·유니코드·재고 규칙·long 경계, BigInteger 모델 256연산 | Spring·DB 정합성의 근거로 사용하지 않음 |
 | PostgreSQL 통합 | 실제 DDL 제약·신규 등록 경쟁·입출고·혼합 요청·롤백·행 잠금·연결 설정 복원 | PostgreSQL 16.14에서 검증, H2 사용 안 함 |
 | 실제 HTTP E2E | 실제 서버·DB에서 입력·업무 오류·동시 변경·requestId·잠금 시간 초과·데드락·커밋 실패 | Mock 업무 경로로 대체하지 않음 |
-| Compose | 소스 이미지 빌드·Flyway·입출고·조회·오류·재시작·컨테이너 재생성 후 보존 | Linux ARM64 실행, 패키지 변경 후 이미지 내부 소스 컴파일 재실행 |
+| Compose | 소스 이미지 빌드·Flyway·입출고·조회·오류·재시작·컨테이너 재생성 후 보존 | Linux ARM64 실행, Lombok 적용 후 이미지 내부 소스 컴파일 재실행 |
 | CI | check와 Compose 검증 workflow 구성, YAML 구문 확인 | 원격 GitHub Actions 실행·AMD64 실행 미검증 |
 
 동시성 시나리오는 작업자 8개·최대 DB 풀 8개로 독립 트랜잭션을 사용하고 각 3회 반복합니다. 시작 조율·모든 결과와 예외 수집·제한된 대기 후 최종 수량, 성공·실패 수, 이력 수와 응답별 이력 일치를 확인합니다. 충분한 재고와 부족한 재고, 순서에 따라 성공 수가 달라지는 혼합 요청을 구분합니다. 자동 ID·시각을 커밋 순서로 가정하지 않습니다.
