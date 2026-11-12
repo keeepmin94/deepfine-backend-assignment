@@ -218,6 +218,11 @@ class InboundIntegrationTest {
         try (var blocker = DriverManager.getConnection(
                 POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
             blocker.setAutoCommit(false);
+            int blockerPid;
+            try (var statement = blocker.createStatement(); var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                assertThat(rows.next()).isTrue();
+                blockerPid = rows.getInt(1);
+            }
             long productId;
             try (var statement = blocker.prepareStatement(
                     "INSERT INTO product (product_code, name) VALUES (?, ?) RETURNING id")) {
@@ -240,21 +245,7 @@ class InboundIntegrationTest {
                     return new Outcome(command, null, exception);
                 }
             });
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            boolean waiting = false;
-            while (System.nanoTime() < deadline) {
-                long waitingCount = jdbc.queryForObject("""
-                        SELECT count(*) FROM pg_stat_activity
-                        WHERE datname = current_database() AND wait_event_type = 'Lock'
-                          AND query LIKE '%ON CONFLICT (product_code)%'
-                        """, Long.class);
-                if (waitingCount == 1) {
-                    waiting = true;
-                    break;
-                }
-                Thread.sleep(20);
-            }
-            assertThat(waiting).isTrue();
+            awaitRegistrationWait(blockerPid);
             assertThat(pending.isDone()).isFalse();
             blocker.commit();
             Outcome outcome = pending.get(10, TimeUnit.SECONDS);
@@ -271,6 +262,91 @@ class InboundIntegrationTest {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    @RepeatedTest(3)
+    void rolledBackRegistrationLetsTheWaitingInboundRegisterItsOwnNameAndHistory() throws Exception {
+        var executor = Executors.newSingleThreadExecutor();
+        try (var blocker = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+            blocker.setAutoCommit(false);
+            int blockerPid;
+            try (var statement = blocker.createStatement(); var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                assertThat(rows.next()).isTrue();
+                blockerPid = rows.getInt(1);
+            }
+            long rolledBackProductId;
+            try (var statement = blocker.prepareStatement("""
+                    INSERT INTO product (product_code, name) VALUES ('PRODUCT-A', '상품 A') RETURNING id
+                    """)) {
+                try (var rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    rolledBackProductId = rows.getLong(1);
+                }
+            }
+            try (var statement = blocker.prepareStatement(
+                    "INSERT INTO inventory (product_id, quantity) VALUES (?, 9)")) {
+                statement.setLong(1, rolledBackProductId);
+                statement.executeUpdate();
+            }
+            try (var statement = blocker.prepareStatement("""
+                    INSERT INTO stock_movement (product_id, movement_type, quantity, quantity_after)
+                    VALUES (?, 'INBOUND', 9, 9)
+                    """)) {
+                statement.setLong(1, rolledBackProductId);
+                statement.executeUpdate();
+            }
+            assertThat(count("product")).isZero();
+            assertThat(count("inventory")).isZero();
+            assertThat(count("stock_movement")).isZero();
+            var command = new InboundCommand("PRODUCT-A", "상품 B", 5);
+            var pending = executor.submit(() -> {
+                try {
+                    return new Outcome(command, stockService.inbound(command), null);
+                } catch (Exception exception) {
+                    return new Outcome(command, null, exception);
+                }
+            });
+            awaitRegistrationWait(blockerPid);
+            assertThat(pending.isDone()).isFalse();
+            blocker.rollback();
+            Outcome outcome = pending.get(10, TimeUnit.SECONDS);
+            assertThat(outcome.failure()).isNull();
+            assertThat(outcome.result().productCode()).isEqualTo("PRODUCT-A");
+            assertThat(outcome.result().movementType()).isEqualTo(MovementType.INBOUND);
+            assertThat(outcome.result().quantity()).isEqualTo(5);
+            assertThat(outcome.result().quantityAfter()).isEqualTo(5);
+            assertState(5, 1);
+            assertThat(jdbc.queryForObject("SELECT name FROM product", String.class)).isEqualTo("상품 B");
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM product WHERE id = ?", Long.class,
+                    rolledBackProductId)).isZero();
+            assertThat(jdbc.queryForObject("SELECT id FROM stock_movement", Long.class))
+                    .isEqualTo(outcome.result().movementId());
+            assertThat(jdbc.queryForObject("SELECT quantity FROM stock_movement", Long.class)).isEqualTo(5);
+            assertThat(jdbc.queryForObject("SELECT quantity_after FROM stock_movement", Long.class)).isEqualTo(5);
+            assertThat(jdbc.queryForObject("SELECT created_at FROM stock_movement", java.sql.Timestamp.class).toInstant())
+                    .isEqualTo(outcome.result().createdAt());
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    private void awaitRegistrationWait(int blockerPid) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            long waitingCount = jdbc.queryForObject("""
+                    SELECT count(*) FROM pg_stat_activity
+                    WHERE datname = current_database() AND wait_event_type = 'Lock'
+                      AND query LIKE '%ON CONFLICT (product_code)%'
+                      AND ? = ANY(pg_blocking_pids(pid))
+                    """, Long.class, blockerPid);
+            if (waitingCount == 1) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("Registration did not wait for the expected PostgreSQL backend within 5 seconds");
     }
 
     private StockMovementResult inbound(String code, String name, long quantity) {

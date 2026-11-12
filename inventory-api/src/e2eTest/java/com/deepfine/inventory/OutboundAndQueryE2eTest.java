@@ -7,10 +7,15 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -261,6 +266,131 @@ class OutboundAndQueryE2eTest {
         assertThat(response.body()).doesNotContain("P0001", "Injected", "stock_movement", "Exception");
         assertState(10, 1);
         assertThat(jdbc.queryForMap("SELECT * FROM inventory")).isEqualTo(before);
+    }
+
+    @RepeatedTest(3)
+    void waitingHttpOutboundRechecksStockAfterTheEarlierTransactionCommits() throws Exception {
+        assertWaitingOutboundAfterEarlierTransaction(true);
+    }
+
+    @RepeatedTest(3)
+    void waitingHttpOutboundUsesRestoredStockAfterTheEarlierTransactionRollsBack() throws Exception {
+        assertWaitingOutboundAfterEarlierTransaction(false);
+    }
+
+    private void assertWaitingOutboundAfterEarlierTransaction(boolean commitEarlier) throws Exception {
+        seedStock(5);
+        var before = jdbc.queryForMap("SELECT * FROM inventory");
+        var executor = Executors.newSingleThreadExecutor();
+        try (var blocker = DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())) {
+            blocker.setAutoCommit(false);
+            int blockerPid;
+            try (var statement = blocker.createStatement(); var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+                assertThat(rows.next()).isTrue();
+                blockerPid = rows.getInt(1);
+            }
+            long productId;
+            java.sql.Timestamp stagedUpdatedAt;
+            // JDBC stages an earlier transaction; only the waiting request uses the actual HTTP service path.
+            try (var statement = blocker.prepareStatement("""
+                    UPDATE inventory SET quantity = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE product_id = (SELECT id FROM product WHERE product_code = 'PRODUCT-A')
+                    RETURNING product_id, updated_at
+                    """)) {
+                try (var rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    productId = rows.getLong(1);
+                    stagedUpdatedAt = rows.getTimestamp(2);
+                }
+            }
+            long stagedMovementId;
+            try (var statement = blocker.prepareStatement("""
+                    INSERT INTO stock_movement (product_id, movement_type, quantity, quantity_after)
+                    VALUES (?, 'OUTBOUND', 4, 1) RETURNING id
+                    """)) {
+                statement.setLong(1, productId);
+                try (var rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    stagedMovementId = rows.getLong(1);
+                }
+            }
+            var snapshotWhileLocked = getStock("PRODUCT-A");
+            assertThat(snapshotWhileLocked.statusCode()).isEqualTo(200);
+            assertThat(mapper.readTree(snapshotWhileLocked.body()).path("quantity").asLong()).isEqualTo(5);
+            assertThat(jdbc.queryForMap("SELECT * FROM inventory")).isEqualTo(before);
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movement", Long.class)).isEqualTo(1);
+            var pending = executor.submit(() -> post(OUTBOUND_PATH, """
+                    {"productCode":"PRODUCT-A","quantity":3}
+                    """));
+            awaitOutboundLockWait(blockerPid);
+            assertThat(pending.isDone()).isFalse();
+            if (commitEarlier) {
+                blocker.commit();
+            } else {
+                blocker.rollback();
+            }
+            var response = pending.get(10, TimeUnit.SECONDS);
+            String requestId = response.headers().firstValue("X-Request-Id").orElseThrow();
+            assertThat(UUID.fromString(requestId).toString()).isEqualTo(requestId);
+            if (commitEarlier) {
+                assertError(response, 409, "INSUFFICIENT_STOCK", OUTBOUND_PATH);
+                assertState(1, 2);
+                assertThat(jdbc.queryForObject("SELECT updated_at FROM inventory", java.sql.Timestamp.class))
+                        .isEqualTo(stagedUpdatedAt);
+                assertThat(jdbc.queryForObject("SELECT id FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(stagedMovementId);
+                assertThat(jdbc.queryForObject("SELECT quantity FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(4);
+                assertThat(jdbc.queryForObject("SELECT quantity_after FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(1);
+            } else {
+                assertThat(response.statusCode()).isEqualTo(201);
+                var movement = mapper.readTree(response.body());
+                assertThat(movement.size()).isEqualTo(6);
+                assertThat(movement.path("productCode").asText()).isEqualTo("PRODUCT-A");
+                assertThat(movement.path("movementType").asText()).isEqualTo("OUTBOUND");
+                assertThat(movement.path("quantity").asLong()).isEqualTo(3);
+                assertThat(movement.path("quantityAfter").asLong()).isEqualTo(2);
+                assertState(2, 2);
+                assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movement WHERE id = ?", Long.class,
+                        stagedMovementId)).isZero();
+                assertThat(jdbc.queryForObject("SELECT id FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(movement.path("movementId").asLong());
+                assertThat(jdbc.queryForObject("SELECT quantity FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(3);
+                assertThat(jdbc.queryForObject("SELECT quantity_after FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        Long.class)).isEqualTo(2);
+                assertThat(jdbc.queryForObject("SELECT created_at FROM stock_movement WHERE movement_type = 'OUTBOUND'",
+                        java.sql.Timestamp.class).toInstant()).isEqualTo(Instant.parse(movement.path("createdAt").asText()));
+            }
+            var query = getStock("PRODUCT-A");
+            assertThat(query.statusCode()).isEqualTo(200);
+            var snapshot = mapper.readTree(query.body());
+            assertThat(snapshot.path("quantity").asLong()).isEqualTo(commitEarlier ? 1 : 2);
+            assertThat(Instant.parse(snapshot.path("updatedAt").asText())).isEqualTo(
+                    jdbc.queryForObject("SELECT updated_at FROM inventory", java.sql.Timestamp.class).toInstant());
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    private void awaitOutboundLockWait(int blockerPid) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            long waitingCount = jdbc.queryForObject("""
+                    SELECT count(*) FROM pg_stat_activity
+                    WHERE datname = current_database() AND wait_event_type = 'Lock'
+                      AND lower(query) LIKE '%from inventory%'
+                      AND ? = ANY(pg_blocking_pids(pid))
+                    """, Long.class, blockerPid);
+            if (waitingCount == 1) {
+                return;
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("HTTP outbound did not wait for the expected PostgreSQL backend within 5 seconds");
     }
 
     private void seedStock(long quantity) throws Exception {

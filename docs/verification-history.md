@@ -275,3 +275,41 @@ macOS ARM64 / Homebrew Java 21.0.12.1 / Gradle 8.8, Docker Engine 24.0.2 / Compo
 새 격리 PostgreSQL 16.14의 Flyway V1 적용, 입고 10 → 출고 3 → 조회 7, 초과 출고 409, 요청 ID를 확인했습니다. 상품·재고 각 1행과 성공 이력 2행·합계 7을 검사하고 DB·API 재시작 및 컨테이너 재생성 후 같은 상태를 확인했습니다. 검증 프로젝트 자원을 정리하고 기존 Docker 볼륨은 보존했습니다.
 
 원격 CI·AMD64·현재 코드의 새 원격 clone은 미검증입니다. Linux 컨테이너에서 전체 테스트를 다시 실행한 것은 아니며, 호스트의 전체 테스트와 이미지 빌드·Compose 실행을 구분합니다. 이번 변경은 생성자 반복 제거와 필요한 컴파일 의존성 추가이며 HTTP 계약·DB 스키마·업무 규칙·트랜잭션 옵션은 변경하지 않았습니다. 원격 push는 하지 않았습니다.
+
+### 17. 선행 트랜잭션 커밋·롤백 후 대기자 처리 검증 (2026-11-12)
+
+기존 8개 동시 작업자 테스트는 Core 입고 3종·출고/혼합 5종·HTTP 신규 등록/혼합 4종으로 12종이며 각각 3회, 한 번의 전체 실행에서 36회입니다. 별도로 실제 데드락 3회와 UNIQUE 충돌 대기, 행 잠금·상품 간 독립성, 잠금 시간 초과, 트랜잭션 한정 설정 복원, 병렬 요청 추적을 검증합니다. 기존 전체 테스트 231건 모두가 동시성 전용이라는 뜻은 아닙니다.
+
+추가한 시나리오 3종은 각각 3회 실행해 테스트 9건을 늘립니다. 운영 코드·스키마·설정·의존성·트랜잭션 옵션과 record는 변경하지 않았습니다.
+
+| 선행 상태와 해제 | 대기자 | 검증 결과 |
+| --- | --- | --- |
+| 상품명 A·재고 9·입고 이력을 미커밋으로 만든 뒤 롤백 | 동일 코드·상품명 B의 Core 입고 5 | 상품·재고 각 1행, B 이름, 재고 5·이력 1건. 선행 상품 ID·재고·이력 부재와 성공 결과 일치 |
+| 재고 5에서 출고 4를 반영한 상태를 커밋 | 실제 HTTP 출고 3 | 최신 재고 1로 재검사해 409·INSUFFICIENT_STOCK, 이력 2건. 선행 수정 시각 보존·추가 출고 이력 부재 |
+| 같은 선행 출고 상태를 롤백 | 실제 HTTP 출고 3 | 복원된 재고 5에서 201, 최종 2·이력 2건. 롤백된 이력 ID 부재·성공 응답/저장 이력의 ID·수량·변경 후 수량·시각 일치 |
+
+선행 트랜잭션은 테스트 전용 독립 JDBC 연결로 상태를 만들며 대기자만 실제 Core 서비스 또는 실제 HTTP 경로를 통과합니다. 두 요청 모두 HTTP로 실행하거나 선행 서비스의 커밋 실패를 새로 주입한 테스트라고 주장하지 않습니다. 선행 서비스 자체의 커밋 실패·원자성은 기존 지연 트리거 테스트로 별도 검증합니다.
+
+모든 신규 사례는 pg_stat_activity의 Lock 대기와 pg_blocking_pids에 지정한 선행 backend PID가 포함되는 것을 확인한 뒤 커밋·롤백합니다. 완료 전 Future가 미완료인지도 검사합니다. 기존 등록 커밋 대기 2건도 같은 PID 확인 helper를 사용하도록 강화했습니다. 관측은 최대 5초, 결과 회수 10초, 작업자 종료 5초, 기존 HTTP 제한은 10초입니다. 운영 기본 lock_timeout 3초를 늘리지 않았으며 성공·실패 기대값을 완화하지 않았습니다.
+
+먼저 관련 클래스 전체를 실행했습니다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon \
+  :inventory-core:integrationTest --tests com.deepfine.inventory.core.InboundIntegrationTest \
+  :inventory-api:e2eTest --tests com.deepfine.inventory.OutboundAndQueryE2eTest
+```
+
+대상 클래스는 Core 입고 21건과 HTTP 출고·조회 45건으로 합계 66건이며 성공했습니다. BUILD SUCCESSFUL, 39초, 9개 actionable task 중 4개 실행·5개 UP-TO-DATE입니다. 이후 필터 없이 이전 빌드 결과를 지우고 전체 검증을 수행했습니다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon clean check :inventory-api:bootJar
+```
+
+macOS ARM64 / Homebrew Java 21.0.12.1 / Gradle 8.8, Docker Engine 24.0.2, PostgreSQL 16.14 Linux ARM64에서 BUILD SUCCESSFUL, 1분 46초, actionable task 19개 모두 실행을 확인했습니다. XML 집계는 단위 68·DB 통합 63·HTTP E2E 109, 총 240건이며 실패·오류·건너뜀 0건입니다. 기존 동시 입출고·혼합·시간 초과·데드락·롤백 테스트도 함께 통과했고 실행 JAR도 생성했습니다.
+
+이번 변경은 테스트와 문서만 포함하므로 Compose는 다시 실행하지 않았습니다. 운영 소스·빌드·Docker 설정은 직전 Lombok 검증 커밋과 같습니다. 최대 처리량·p95 지연·커넥션 풀 포화·대규모 지속 부하에서의 안정성을 측정한 것은 아닙니다. 원격 CI·AMD64·새 원격 clone도 미검증이며 원격 push하지 않았습니다.
