@@ -317,23 +317,25 @@ DDL 기준은 [V1__create_inventory_schema.sql](inventory-api/src/main/resources
 
 ### 8. 검증 결과와 실행 범위
 
-최신 전체 테스트는 동시성 대기·해제 경로 보강 후 `./gradlew --no-daemon clean check :inventory-api:bootJar`로 실행했습니다. macOS ARM64 / Homebrew Java 21.0.12.1, PostgreSQL 16.14 Linux ARM64에서 단위 68건·DB 통합 63건·실제 HTTP E2E 109건, **총 240건 성공**, 실패·오류·건너뜀 0건입니다. 19개 actionable task가 모두 실행됐고 실행 JAR도 생성했습니다. 패키지 정리 전 6단계에는 Linux ARM64 / Temurin 21.0.13+9에서도 전체 테스트를 수행했으며 당시 결과는 검증 기록에 구분합니다.
+GitHub에 push한 `eb906c4`에서 [Ubuntu/AMD64 CI](https://github.com/keeepmin94/deepfine-backend-assignment/actions/runs/43225683837)의 전체 테스트 작업과 Compose 검증이 성공했습니다. 실제 실행 환경은 Ubuntu 24.04.5 / Temurin 21.0.13+9 / Docker 28.0.4 / Compose 2.38.2입니다.
+
+같은 원격 커밋을 HTTPS로 새 경로에 clone해 `./gradlew --no-daemon clean check`를 다시 실행했습니다. macOS ARM64 / Homebrew Java 21.0.12.1, PostgreSQL 16.14 Linux ARM64에서 단위 68건·DB 통합 63건·실제 HTTP E2E 109건, **총 240건 성공**, 실패·오류·건너뜀 0건입니다. XML 집계는 이 새 clone의 로컬 실행 결과이며 CI의 테스트 수를 별도로 추정해 집계한 것이 아닙니다. CI 로그에서는 세 테스트 작업 실행과 BUILD SUCCESSFUL을 확인했습니다.
 
 | 구분 | 확인한 범위 | 한계 |
 | --- | --- | --- |
 | 단위 | 입력·유니코드·재고 규칙·long 경계, BigInteger 모델 256연산 | Spring·DB 정합성의 근거로 사용하지 않음 |
 | PostgreSQL 통합 | 실제 DDL 제약·신규 등록 경쟁·입출고·혼합 요청·롤백·행 잠금·연결 설정 복원 | PostgreSQL 16.14에서 검증, H2 사용 안 함 |
 | 실제 HTTP E2E | 실제 서버·DB에서 입력·업무 오류·동시 변경·requestId·잠금 시간 초과·데드락·커밋 실패 | Mock 업무 경로로 대체하지 않음 |
-| Compose | 소스 이미지 빌드·Flyway·입출고·조회·오류·재시작·컨테이너 재생성 후 보존 | Linux ARM64 실행, Lombok 적용 후 이미지 내부 소스 컴파일 재실행 |
-| CI | check와 Compose 검증 workflow 구성, YAML 구문 확인 | 원격 GitHub Actions 실행·AMD64 실행 미검증 |
+| Compose | CI의 Linux AMD64와 원격 clone의 로컬 Linux ARM64에서 이미지 빌드·Flyway·HTTP·데이터 보존 확인 | 기반 이미지·일부 빌드 캐시 사용, 변경 소스는 이미지 내부에서 컴파일 |
+| CI | Ubuntu 24.04.5 / AMD64에서 check·Compose 단계 모두 성공 | 위 실행 링크와 커밋 기준의 결과, 이후 변경은 새 CI 결과 확인 필요 |
 
 동시성 시나리오는 작업자 8개·최대 DB 풀 8개로 독립 트랜잭션을 사용하고 각 3회 반복합니다. 시작 조율·모든 결과와 예외 수집·제한된 대기 후 최종 수량, 성공·실패 수, 이력 수와 응답별 이력 일치를 확인합니다. 충분한 재고와 부족한 재고, 순서에 따라 성공 수가 달라지는 혼합 요청을 구분합니다. 자동 ID·시각을 커밋 순서로 가정하지 않습니다.
 
 롤백 테스트는 테스트 DB의 지연 트리거로 재고 UPDATE 후 커밋 실패를 주입합니다. 기존 재고·수정 시각·이력 복원과 신규 상품·재고·이력 전체 취소, HTTP 500·503 응답을 확인합니다. 운영 스키마에는 오류 주입 트리거가 없습니다. Compose의 재고 부족 거부는 저장 실패 시 롤백 검증과 구분합니다.
 
-실행 명령·환경·시나리오와 최초 실패 및 수정 기록은 [단계별 검증 기록](docs/verification-history.md)에 보존합니다. 테스트 통과는 모든 실행 순서·운영 처리량·사용자의 설계 이해를 보장하지 않습니다. 원격 push와 원격 clone 검증은 수행하지 않았습니다.
+실행 명령·환경·시나리오와 최초 실패 및 수정 기록은 [단계별 검증 기록](docs/verification-history.md)에 보존합니다. 테스트 통과는 모든 실행 순서·운영 처리량·사용자의 설계 이해를 보장하지 않습니다.
 
-7단계에서는 로컬 커밋 `f276062`를 새 임시 경로에 clone하고 변경한 문서를 적용해 curl 예시 6개를 실제 검증했습니다. 순서대로 201·201·200·409·404·400, 응답 필드·요청 ID·한글 상품명·재고 7·성공 이력 2건을 확인했습니다. `stop/start`와 `down/up` 후에도 같은 상태를 확인하고 검증 프로젝트만 정리했습니다. 기존 환경과 분리하려고 고유 Compose 프로젝트·임의 호스트 포트를 사용했고 Docker 빌드 캐시를 재사용했습니다. Gradle은 `--offline check --dry-run`으로 세 테스트 작업의 연결만 확인했으며 이번 단계에서 전체 테스트를 다시 실행하지 않았습니다. 업무 코드·설정·의존성·DDL은 6단계와 같습니다.
+원격 clone에는 기존 `.env`·로컬 계획 문서·빌드 결과가 없는 것을 확인했습니다. `.env.example`을 `.env`로 복사해 검증용 비밀번호와 임의 호스트 포트를 파일에 설정하고, 상속된 DB 환경변수를 제거한 상태에서 API·DB가 그 파일의 같은 계정 정보를 사용하는지 확인했습니다. 새 격리 볼륨에 기동한 뒤 README curl 6개가 순서대로 201·201·200·409·404·400인지 검사했습니다. 응답 필드·요청 ID·한글 상품명·재고 7·성공 이력 2건과 `stop/start`·`down/up` 후 보존까지 확인했습니다. 검증 프로젝트 자원만 정리했고 기존 DB 볼륨은 유지했습니다. 이는 새 소스·새 환경 파일·새 DB 볼륨 검증이며 호스트 의존성 캐시까지 전부 제거한 검증은 아닙니다.
 
 ## 이미지와 CI
 
@@ -341,7 +343,7 @@ DDL 기준은 [V1__create_inventory_schema.sql](inventory-api/src/main/resources
 
 Compose의 DB healthcheck는 DB 접속 준비를 확인합니다. API는 이후 Flyway·JPA 검증을 거쳐 기동하므로 `depends_on`이나 `up --wait`만으로 HTTP 준비를 판단하지 않습니다. [검증 스크립트](scripts/verify-compose.sh)가 실제 조회 경로를 제한된 횟수로 확인하고 입출고는 한 번씩만 전송합니다.
 
-[CI workflow](.github/workflows/ci.yaml)는 main push·pull request·수동 실행에서 Ubuntu 24.04 / Temurin 21.0.13+9로 `./gradlew --no-daemon clean check`와 `./scripts/verify-compose.sh`를 실행합니다. 어느 명령이든 실패하면 작업이 실패합니다. checkout·setup-java는 커밋 SHA로 고정하고 저장소 읽기 권한만 부여합니다. 현재는 로컬 검증 결과이며 원격 CI 성공을 주장하지 않습니다.
+[CI workflow](.github/workflows/ci.yaml)는 main push·pull request·수동 실행에서 Ubuntu 24.04 / Temurin 21.0.13+9로 `./gradlew --no-daemon clean check`와 `./scripts/verify-compose.sh`를 실행합니다. 어느 명령이든 실패하면 작업이 실패합니다. checkout·setup-java는 커밋 SHA로 고정하고 저장소 읽기 권한만 부여합니다. 위 검증 기록에는 실제 원격 CI 결과를 연결했으며 새로운 커밋의 상태는 [Actions](https://github.com/keeepmin94/deepfine-backend-assignment/actions)에서 확인할 수 있습니다.
 
 ## 입고 처리와 트랜잭션
 

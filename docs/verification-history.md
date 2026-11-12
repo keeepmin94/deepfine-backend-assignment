@@ -313,3 +313,48 @@ GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
 macOS ARM64 / Homebrew Java 21.0.12.1 / Gradle 8.8, Docker Engine 24.0.2, PostgreSQL 16.14 Linux ARM64에서 BUILD SUCCESSFUL, 1분 46초, actionable task 19개 모두 실행을 확인했습니다. XML 집계는 단위 68·DB 통합 63·HTTP E2E 109, 총 240건이며 실패·오류·건너뜀 0건입니다. 기존 동시 입출고·혼합·시간 초과·데드락·롤백 테스트도 함께 통과했고 실행 JAR도 생성했습니다.
 
 이번 변경은 테스트와 문서만 포함하므로 Compose는 다시 실행하지 않았습니다. 운영 소스·빌드·Docker 설정은 직전 Lombok 검증 커밋과 같습니다. 최대 처리량·p95 지연·커넥션 풀 포화·대규모 지속 부하에서의 안정성을 측정한 것은 아닙니다. 원격 CI·AMD64·새 원격 clone도 미검증이며 원격 push하지 않았습니다.
+
+### 18. 실제 GitHub CI·새 원격 clone 재현 검증 (2026-11-12)
+
+대상은 원격 main의 `eb906c42618b3be4d264ce2adec8c1e3dcb1c25d`입니다. 로컬 HEAD·원격 main·새 clone의 SHA가 일치하는 것을 확인했습니다. 아래 결과는 이전의 로컬 Git tree 내보내기나 로컬 경로 clone과 구분합니다.
+
+[Inventory verification 실행 43225683837](https://github.com/keeepmin94/deepfine-backend-assignment/actions/runs/43225683837)은 completed / success입니다. verify job과 전체 테스트·Compose 단계 모두 success인 것을 GitHub API로 조회하고 실제 job 로그도 확인했습니다.
+
+| 항목 | 실제 CI 로그에서 확인한 값 |
+| --- | --- |
+| OS·아키텍처 | Ubuntu 24.04.5 LTS, Docker client/server linux/amd64 |
+| Java | Temurin 21.0.13+9 |
+| Docker·Compose | Engine 28.0.4, Compose 2.38.2 |
+| 전체 테스트 | `./gradlew --no-daemon clean check`, BUILD SUCCESSFUL, 1분 25초 |
+| 작업 실행 | 17개 actionable task 중 15개 실행. 처음부터 빌드 디렉터리가 없는 clean 2개만 UP-TO-DATE |
+| 이미지 빌드 | 소스에서 bootJar 생성 성공, 6개 actionable task 실행 |
+| Compose | build·Flyway·HTTP·request IDs·거부된 출고·재시작/재생성 후 보존 검증 성공 메시지와 종료 성공 |
+
+테스트가 실행되지 않은 UP-TO-DATE 결과를 성공으로 대신 집계하지 않았습니다. API 단위·통합·E2E, Core 단위·통합 작업의 실행을 확인했습니다. Core e2eTest의 NO-SOURCE는 HTTP 서버가 API 모듈에 있는 기존 구성입니다. CI가 테스트 결과 XML을 artifact로 올리도록 추가하지 않았으므로 원격의 개별 건수는 별도 집계하지 않았습니다.
+
+그다음 실제 HTTPS 원격 주소로 새 임시 디렉터리에 clone했습니다.
+
+```bash
+clone_dir=$(mktemp -d /private/tmp/deepfine-remote-verify.XXXXXX)
+git clone --quiet https://github.com/keeepmin94/deepfine-backend-assignment.git "$clone_dir"
+cd "$clone_dir"
+cp .env.example .env
+```
+
+clone 직후 `.env`·로컬 계획 문서·기존 build 디렉터리 부재와 gradlew·검증 스크립트의 실행 권한을 확인했습니다. `.env`에 검증용 비밀번호를 설정하고 DB_PORT·SERVER_PORT는 기존 환경과 충돌하지 않도록 0으로 바꿨습니다. 검증 프로세스가 상속한 DB 환경변수는 제거하고, Compose의 설정 출력에서 API·DB가 새 `.env`의 같은 사용자·비밀번호를 받는지 확인했습니다. 기존 로컬 `.env`나 개발 DB를 복사해 쓰지 않았습니다.
+
+고유 Compose 프로젝트와 새 named volume으로 `docker compose up --build -d --wait`를 실행했습니다. 호스트는 macOS ARM64 / Docker Engine 24.0.2 / Compose 2.18.1이며 DB·앱은 Linux ARM64입니다. 기반 이미지·일부 빌드 캐시는 재사용했지만 API·Core 소스 복사와 이미지 내부 bootJar 컴파일은 다시 수행했습니다. BUILD SUCCESSFUL, 6개 actionable task 실행을 확인했습니다.
+
+README의 curl 예시 6개를 임시 검증 도구로 직접 추출해 주소만 실제 임의 포트로 치환했습니다. 진단용 상태 수집·제한 시간 옵션을 덧붙였고 입출고 자동 재전송은 하지 않았습니다. 201·201·200·409·404·400과 응답 필드·요청 ID·한글 상품명·재고를 확인했습니다. DB에서는 Flyway V1, 상품·재고 각 1행, 수량 7·성공 이력 2행·이력 합계 7을 검사했습니다. stop/start와 down/up 후 같은 HTTP·DB 상태를 확인하고 검증 프로젝트 자원만 정리했습니다. 기존 Docker 볼륨 3개는 보존됐습니다.
+
+같은 원격 clone에서 전체 테스트도 별도 실행했습니다. Compose 업무 DB와 다른 Testcontainers DB를 사용합니다.
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon clean check
+```
+
+macOS ARM64 / Homebrew Java 21.0.12.1 / PostgreSQL 16.14 Linux ARM64에서 BUILD SUCCESSFUL, 2분 11초, actionable task 17개 중 15개 실행·최초 clean 2개 UP-TO-DATE를 확인했습니다. 회수한 XML은 단위 68·DB 통합 63·HTTP E2E 109, 합계 240건이며 실패·오류·건너뜀 0건입니다. 이 집계는 새 원격 clone의 로컬 실행 결과이며 CI의 개별 테스트 수를 추정한 값이 아닙니다.
+
+재현 후 clone의 추적 파일은 변경되지 않았고 새 `.env`·빌드 결과는 Git에서 제외됐습니다. 이번 검증 결과 반영은 문서만 변경하며 실행 코드·API 예시·설정·DDL·테스트 기대값은 변경하지 않습니다. 대규모 부하 성능과 사용자의 설계 이해까지 검증 완료로 취급하지 않습니다.
