@@ -1,5 +1,14 @@
 package com.deepfine.inventory.core;
 
+import com.deepfine.inventory.core.dto.command.InboundCommand;
+import com.deepfine.inventory.core.dto.result.StockMovementResult;
+import com.deepfine.inventory.core.entity.Product;
+import com.deepfine.inventory.core.enums.MovementType;
+import com.deepfine.inventory.core.enums.StockErrorCode;
+import com.deepfine.inventory.core.exception.StockException;
+import com.deepfine.inventory.core.repository.PostgresTransactionRepository;
+import com.deepfine.inventory.core.repository.ProductRepository;
+import com.deepfine.inventory.core.service.StockService;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.ArrayList;

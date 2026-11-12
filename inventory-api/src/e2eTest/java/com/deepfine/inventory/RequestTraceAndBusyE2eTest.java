@@ -3,7 +3,7 @@ package com.deepfine.inventory;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
-import com.deepfine.inventory.api.RequestIdFilter;
+import com.deepfine.inventory.api.filter.RequestIdFilter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpClient;

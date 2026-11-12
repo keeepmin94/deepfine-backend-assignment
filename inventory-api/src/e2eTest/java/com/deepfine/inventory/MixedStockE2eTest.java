@@ -1,6 +1,6 @@
 package com.deepfine.inventory;
 
-import com.deepfine.inventory.core.MovementType;
+import com.deepfine.inventory.core.enums.MovementType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpClient;

@@ -1,5 +1,11 @@
 package com.deepfine.inventory.core;
 
+import com.deepfine.inventory.core.dto.command.InboundCommand;
+import com.deepfine.inventory.core.dto.command.OutboundCommand;
+import com.deepfine.inventory.core.entity.Product;
+import com.deepfine.inventory.core.repository.PostgresTransactionRepository;
+import com.deepfine.inventory.core.repository.ProductRepository;
+import com.deepfine.inventory.core.service.StockService;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.concurrent.Callable;

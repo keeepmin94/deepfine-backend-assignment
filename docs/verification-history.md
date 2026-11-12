@@ -221,3 +221,31 @@ GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
 README와 이 문서의 코드 펜스·상대 파일 링크, Bash 예시의 `bash -n`, `git diff --check`를 확인했습니다. 정적 문서 확인과 위 실제 HTTP·DB 실행은 구분합니다. 기존 검증 기록 이동 전후의 본문이 동일한지도 확인했습니다.
 
 남은 확인은 원격 push 후 GitHub Actions의 실제 Ubuntu 24.04 / AMD64 실행, 원격 clone과 해당 환경의 재현, 사용자의 설계 이해입니다. push는 승인되지 않아 수행하지 않았으며 변경 승인·실행 성공만으로 이해 확인을 대신하지 않습니다.
+
+### 15. 역할별 패키지 정리 검증 (2026-11-12)
+
+승인한 분류안에 따라 운영 Java 클래스 28개와 단위 테스트 6개를 역할별 패키지로 이동했습니다. API는 controller·dto/request·dto/response·exception·config·filter, Core는 service·repository·entity·dto/command·dto/result·enums·exception·validator로 나눕니다. InventoryApplication의 위치는 유지했습니다.
+
+패키지·import와 JPQL DTO 생성자의 전체 클래스명을 수정했습니다. 통합 테스트의 EntityScan·Repository 탐색 기준은 이동한 클래스 참조를 사용하고, 업무·검증 흐름은 유지했습니다. Service가 다른 패키지의 Entity 생성 메서드를 호출할 수 있도록 StockMovement.inbound·outbound 두 메서드만 package-private에서 public static으로 변경했습니다. JPA 기본 생성자와 내부 공통 생성 메서드의 접근 범위는 유지했습니다. DTO 변환 메서드를 유지해 별도 mapper·라이브러리는 추가하지 않았습니다.
+
+실제 실행 명령:
+
+```bash
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
+./gradlew --no-daemon clean check :inventory-api:bootJar
+```
+
+macOS ARM64 / Homebrew Java 21.0.12.1 / Gradle 8.8, Docker Engine 24.0.2 / Compose 2.18.1, PostgreSQL 16.14 Linux ARM64에서 BUILD SUCCESSFUL, 1분 40초, 19개 actionable task 모두 실행을 확인했습니다. XML 집계는 단위 68건·PostgreSQL 통합 60건·실제 HTTP E2E 103건으로 총 231건이며 실패·오류·건너뜀 0건입니다. 테스트 본문·기대값은 변경하지 않았고 실행 JAR도 새 패키지로 생성됐습니다.
+
+정적 비교에서는 Java 파일 46개에 대해 package·import·변경된 전체 클래스 참조와 승인된 생성 메서드 두 개의 접근 범위를 제외한 본문이 같은지 확인했습니다. 파일 경로와 package 일치, 이전 패키지의 클래스 참조 부재, README의 파일 링크·Bash 예시도 확인했습니다. 이 정적 비교는 위 실제 테스트 실행을 대신하지 않습니다.
+
+```bash
+./scripts/verify-compose.sh
+```
+
+Compose 검증도 성공 종료했습니다. 기반 이미지·Wrapper 입력 레이어 캐시는 사용했지만 변경한 API·Core 소스 복사와 이미지 내부 JDK 컴파일은 다시 실행했습니다. `:inventory-api:bootJar`가 BUILD SUCCESSFUL, 6개 actionable task 모두 실행으로 끝났고 Linux ARM64 / Temurin JRE 21.0.13+9에서 API가 기동했습니다. 호스트의 빌드 결과는 Docker 컨텍스트에서 제외했습니다.
+
+새 격리 볼륨에 PostgreSQL 16.14·Flyway V1이 적용됐고, 실제 HTTP 입고 10·출고 3·조회 7·초과 출고 409와 요청 ID를 확인했습니다. 상품·재고 각 1행, 성공 이력 2행 및 이력 합계 7을 검사했습니다. DB·API 재시작과 `down` → `up` 후 같은 HTTP·DB 상태를 확인한 뒤 고유 검증 프로젝트의 컨테이너·네트워크·볼륨만 정리했습니다.
+
+이번 패키지 변경 후 전체 테스트는 macOS Java 21.0.12.1에서, 이미지 빌드·Compose는 Linux ARM64 Temurin 21.0.13+9에서 검증했습니다. Linux 컨테이너에서 전체 테스트를 다시 실행하거나 원격 CI·AMD64·새 원격 clone을 검증한 것은 아닙니다. DB 스키마·HTTP 계약·업무 규칙·트랜잭션 옵션·의존성은 변경하지 않았고 원격 push도 하지 않았습니다.
