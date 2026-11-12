@@ -20,6 +20,8 @@ Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL
 - inventory: 상품당 하나의 현재 재고
 - stock_movement: 성공한 입출고 이력
 
+Gradle 의존성은 `inventory-api → inventory-core`입니다. 모듈을 나누지만 실행 애플리케이션과 DB는 각각 하나입니다. Controller는 HTTP 경계, Service는 트랜잭션 조율, Entity는 재고 규칙, Repository는 DB 접근을 담당합니다. Core는 JPA에 의존하며 HTTP DTO·상태 코드는 API 모듈에 둡니다. 구체적인 필요가 없는 서비스 인터페이스나 도메인·영속성 모델 중복은 만들지 않았습니다.
+
 상품 정보와 재고 상태의 책임을 구분하기 위해 테이블을 분리합니다. 현재는 1:1 구조이고 창고·옵션별 재고는 제외합니다. 향후 재고 기능이 확대되면 상품 정보에 미치는 영향을 줄이고 재고 영역 중심으로 확장할 수 있습니다. 분리에 따른 JOIN과 동시 생성 비용은 있으며, 분리 자체가 동시성이나 성능을 보장하는 것은 아닙니다.
 
 ## API와 구현 상태
@@ -66,6 +68,11 @@ docker compose version
 
 ```bash
 cp .env.example .env
+```
+
+`.env`의 `POSTGRES_PASSWORD`를 로컬 개발용 값으로 변경한 뒤 실행합니다.
+
+```bash
 docker compose up --build -d --wait
 docker compose ps
 docker compose logs -f api db
@@ -104,12 +111,16 @@ Java 17이 기본으로 선택된 환경에서는 먼저 `JAVA_HOME`과 `PATH`�
 
 ### 4. API 호출 확인
 
-아래 예시는 새 상품 코드를 사용해 순서대로 한 번씩 실행하는 흐름입니다. 실제 HTTP E2E에서 같은 흐름을 검증합니다.
+아래 예시는 새 상품 코드를 사용해 순서대로 한 번씩 실행하는 흐름입니다. 먼저 API 주소를 설정합니다. `SERVER_PORT`를 변경했다면 주소의 포트도 맞춥니다. API 시작 로그를 확인하거나 조회가 응답한 뒤 입출고를 실행합니다.
+
+```bash
+API_URL=http://localhost:8080
+```
 
 신규 상품을 10개 입고합니다. 예상 HTTP 상태는 `201`입니다.
 
 ```bash
-curl -i -X POST http://localhost:8080/api/v1/stock/inbounds \
+curl -i -X POST "$API_URL/api/v1/stock/inbounds" \
   -H 'Content-Type: application/json' \
   -d '{"productCode":"DEMO-001","name":"테스트 상품","quantity":10}'
 ```
@@ -151,7 +162,7 @@ curl -i -X POST http://localhost:8080/api/v1/stock/inbounds \
 같은 상품을 3개 출고합니다. 예상 HTTP 상태는 `201`입니다.
 
 ```bash
-curl -i -X POST http://localhost:8080/api/v1/stock/outbounds \
+curl -i -X POST "$API_URL/api/v1/stock/outbounds" \
   -H 'Content-Type: application/json' \
   -d '{"productCode":"DEMO-001","quantity":3}'
 ```
@@ -161,7 +172,7 @@ curl -i -X POST http://localhost:8080/api/v1/stock/outbounds \
 현재 재고를 조회합니다. 예상 HTTP 상태는 `200`이며, 신규 상품에 위 요청을 각각 한 번만 실행했다면 재고는 `7`입니다.
 
 ```bash
-curl -i http://localhost:8080/api/v1/products/DEMO-001/stock
+curl -i "$API_URL/api/v1/products/DEMO-001/stock"
 ```
 
 ```json
@@ -171,6 +182,20 @@ curl -i http://localhost:8080/api/v1/products/DEMO-001/stock
 `updatedAt`은 상품이 아닌 재고 변경 시각입니다. 경로의 상품 코드에도 본문과 동일한 형식 검증을 적용합니다. 유효한 코드의 미등록 상품은 404이고, 기존 상품의 재고 행 누락은 500입니다. 누락을 재고 0으로 숨기거나 자동 복구하지 않습니다.
 
 같은 입출고 요청을 다시 보내면 재고에 다시 반영됩니다. 재실행 시에는 새 상품 코드를 사용하거나 기존 수량을 고려해야 합니다.
+
+재고 7에서 8개 출고는 `409 / INSUFFICIENT_STOCK`, 미등록 코드 조회는 `404 / PRODUCT_NOT_FOUND`, 숫자 문자열 수량은 `400 / INVALID_REQUEST`입니다. 아래 세 요청은 재고·이력을 변경하지 않습니다.
+
+```bash
+curl -i -X POST "$API_URL/api/v1/stock/outbounds" \
+  -H 'Content-Type: application/json' \
+  -d '{"productCode":"DEMO-001","quantity":8}'
+
+curl -i "$API_URL/api/v1/products/DEMO-MISSING/stock"
+
+curl -i -X POST "$API_URL/api/v1/stock/inbounds" \
+  -H 'Content-Type: application/json' \
+  -d '{"productCode":"DEMO-001","name":"테스트 상품","quantity":"1"}'
+```
 
 ### 5. 테스트 실행
 
@@ -224,219 +249,65 @@ docker compose down -v
 docker compose up -d --wait
 ```
 
-### 7. DDL 및 제출 전 확인
+### 7. 스키마와 데이터 제약
 
-- DDL 기준은 `inventory-api/src/main/resources/db/migration/V1__create_inventory_schema.sql`입니다. 애플리케이션 기동 시 Flyway가 적용하며 Core 통합 테스트도 같은 파일을 사용합니다. DB Compose 단독 실행으로는 적용되지 않습니다.
-- JPA의 `ddl-auto=validate`는 엔티티와 스키마가 맞지 않으면 기동을 실패시킵니다. Product·Inventory·StockMovement 매핑을 실제 마이그레이션에 대조합니다. `open-in-view=false`로 응답 처리 중 DB 접근을 제한합니다.
-- DB 생성 시각은 `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`를 사용해 네이티브 상품·재고 INSERT에도 채웁니다. 이 기본값이 없으면 시각을 생략한 INSERT는 NOT NULL 제약으로 실패합니다. 대안은 모든 INSERT에서 시각을 명시하는 방식입니다. `CURRENT_TIMESTAMP`는 트랜잭션 시작 시각이며 커밋 순서를 뜻하지 않습니다. 수정 시각 자동 갱신 트리거는 없으며 재고 엔티티의 입출고 메서드가 `updatedAt`을 갱신합니다. 이력의 `createdAt`은 JPA 저장 전 애플리케이션에서 채웁니다. JDBC의 시각 변환 기준은 UTC입니다.
-- FK는 참조 무결성만 보장합니다. 입고 서비스가 신규 상품·재고·이력을 한 트랜잭션으로 생성합니다. 기존 상품의 재고 누락은 500으로 처리하며 자동 복구하지 않습니다.
-- 새로 clone한 환경에서 환경 파일 복사 → Compose 빌드·실행 → API 호출 → 테스트 실행을 검증합니다.
-- 재시작 후 DB 데이터 유지 여부와 종료 절차를 확인합니다.
-- 검증한 Java·Docker·PostgreSQL 버전, 실행 명령, 테스트 결과와 미검증 사항을 기록합니다.
-- 후속 단계에서 업무 기능·애플리케이션 이미지·CI 검증 결과를 갱신합니다.
+DDL 기준은 [V1__create_inventory_schema.sql](inventory-api/src/main/resources/db/migration/V1__create_inventory_schema.sql)입니다. 애플리케이션 기동 시 Flyway가 적용하며 Core 통합 테스트도 같은 파일을 사용합니다. DB Compose 단독 실행으로는 적용되지 않습니다. 모든 컬럼은 NOT NULL입니다.
 
-### 8. 1단계 검증 기록 (2026-11-12)
-
-- 환경: macOS ARM64, Homebrew OpenJDK 21.0.12.1, Gradle 8.8, Docker Desktop 4.20.1 / Engine 24.0.2, Compose 2.18.1.
-- DB: PostgreSQL 16.14, Linux ARM64. 개발 Compose와 Testcontainers 모두 `postgres:16.14` 사용.
-- 검증 이미지 digest: `sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b`.
-- Gradle 배포본의 공식 SHA-256을 확인하고 Wrapper의 `distributionSha256Sum`에 고정했습니다.
-
-실제 빌드·테스트 명령:
-
-```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
-./gradlew --no-daemon clean check :inventory-api:bootJar
-```
-
-위 경로는 검증한 Homebrew 환경의 값입니다. 다른 환경에서는 설치된 JDK 21 경로를 사용하며 임시 Gradle 캐시는 필수가 아닙니다.
-
-| 검증 | 결과 |
-| --- | --- |
-| 단위 테스트 | 아직 없음. `test` 작업은 NO-SOURCE이며 단위 테스트 통과로 집계하지 않음 |
-| Core PostgreSQL 통합 테스트 | 13건 성공 |
-| API 기동 통합 테스트 | 1건 성공 |
-| 실제 HTTP 기동 E2E | 1건 성공. 미등록 경로 404 확인 |
-| 위 테스트의 실패·오류·건너뜀 | 모두 0건 |
-| 실행 JAR | 생성 후 검증 전용 Compose DB에 연결하여 V1 적용·서버 기동·HTTP 404 확인 |
-| DB Compose | 별도 검증 프로젝트와 새 볼륨으로 healthcheck 성공, 재시작·컨테이너 재생성 후 SQL로 넣은 데이터 보존 확인 |
-
-이 결과는 1단계 완료 당시의 기반 검증입니다. 당시에는 엔티티·업무 API·동시성·롤백을 검증하지 않았습니다. 이후 입고 검증은 아래 2단계 기록에 구분합니다.
-
-### 9. 2단계 검증 기록 (2026-11-12)
-
-환경과 PostgreSQL 이미지는 1단계와 동일합니다. 실행 명령은 다음과 같습니다.
-
-```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
-./gradlew --no-daemon check :inventory-api:bootJar
-```
-
-결과는 BUILD SUCCESSFUL입니다. 최종 `check`는 변경 없는 작업의 UP-TO-DATE 결과를 재사용했으며 변경된 Core 통합·HTTP 테스트는 다시 실행했습니다. 아래 집계는 1단계 테스트를 포함합니다.
-
-| 종류 | 결과 |
-| --- | --- |
-| 단위 | 28건 성공 (입력 23, 입고 규칙 5) |
-| PostgreSQL 통합 | 32건 성공 (스키마 13, 입고 18, API 기동 1) |
-| 실제 HTTP E2E | 33건 성공 (입고 32, 기동 1) |
-| 합계 | 93건, 실패·오류·건너뜀 0건 |
-| 실행 JAR | 생성 성공. 2단계 업무 흐름은 Testcontainers와 실제 HTTP로 검증했으며 Compose 업무 호출 검증은 후속 단계 |
-
-입고 동시성 테스트는 작업자 8개·DB 풀 최대 8개로 시작 래치를 트랜잭션 진입 전에 해제합니다. 같은 코드 신규 등록, 서로 다른 이름의 신규 등록, 기존 상품 입고를 각각 3회 반복합니다. 모든 결과·예외를 수집하며 시작 대기 5초·결과 수집 전체 20초·실행기 종료 5초로 제한합니다.
-
-별도 테스트에서는 독립 JDBC 트랜잭션이 미커밋 상품·재고를 보유하게 하고, 경쟁 입고가 `pg_stat_activity`에서 실제 UNIQUE 충돌 잠금 대기 중인지 확인한 뒤 커밋합니다. 같은 이름은 성공하고 다른 이름은 409에 해당하는 업무 예외로 종료되는지 검사합니다. 단순히 요청 시작 시각이 비슷했다는 이유만으로 충돌 경로 검증을 대신하지 않습니다.
-
-롤백은 테스트 DB에만 지연 제약 트리거를 설치해 커밋 때 이력 저장을 거부하는 방식으로 검증합니다. Core 테스트의 트리거는 변경된 재고가 DB에 반영됐는지도 검사한 뒤 실패시킵니다. 기존 재고의 수량·수정 시각·이력 복원과 신규 상품·재고·이력 전체 취소를 확인합니다. HTTP 테스트도 커밋 실패가 201이 아닌 500이며 DB에 부분 저장이 없는지 확인합니다. 운영 코드에 오류 주입 경로나 트리거는 없습니다.
-
-2단계 완료 당시에는 출고·조회 API, 혼합 입출고·동시 HTTP 변경, 요청 추적, 잠금 시간 초과·데드락 응답, 애플리케이션 이미지·CI와 새 clone 전체 실행을 검증하지 않았습니다. 이후 출고·조회 검증은 3단계 기록에 구분합니다. 테스트 통과는 운영 처리량이나 모든 실행 순서의 증명이 아닙니다.
-
-### 10. 3단계 검증 기록 (2026-11-12)
-
-환경은 macOS ARM64, Java 21.0.12.1, Gradle 8.8, Boot 3.3.0, PostgreSQL 16.14로 이전 단계와 동일합니다. 관련 작업인 `:inventory-core:test :inventory-core:integrationTest :inventory-api:compileJava`와 `:inventory-api:e2eTest`를 실행한 뒤 아래 최종 명령을 실행했습니다.
-
-```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
-./gradlew --no-daemon check :inventory-api:bootJar
-```
-
-전체 작업은 성공했습니다. 최종 `check`는 이미 실행한 변경 없는 테스트의 UP-TO-DATE 결과를 재사용했고, API 기동 통합 테스트와 실행 JAR 생성을 수행했습니다. 집계는 이전 단계 테스트를 포함합니다.
-
-| 종류 | 결과 |
-| --- | --- |
-| 단위 | 49건 성공 (입력 23+14, 입출고 규칙 12) |
-| PostgreSQL 통합 | 47건 성공 (스키마 13, 입고 18, 출고·조회·잠금 15, API 기동 1) |
-| 실제 HTTP E2E | 64건 성공 (입고 32, 출고·조회 31, 기동 1) |
-| 합계 | 160건, 실패·오류·건너뜀 0건 |
-| 실행 JAR | 생성 성공. 업무 API는 실제 HTTP E2E로 검증했으며 전체 Compose 검증은 후속 단계 |
-
-- 출고 경쟁은 작업자 8개·DB 풀 최대 8개로 충분한 재고와 초과 출고를 각각 3회 반복합니다. 초기 재고 24에서 각 3개 출고는 8건 모두 성공·최종 0, 초기 재고 10에서는 3건 성공·5건 재고 부족·최종 1을 확인합니다. 이력 수와 입고 합계−성공한 출고 합계도 비교합니다. 래치·결과 전체 수집·제한된 대기와 종료를 사용합니다.
-- 독립 JDBC 트랜잭션이 PRODUCT-A의 재고 행 잠금을 유지하는 동안, 해당 상품 출고가 실제 잠금 대기 중인지 `pg_stat_activity`에서 확인합니다. 관측한 Hibernate SQL에 쓰기 잠금 구문이 있는지도 검사합니다. A 조회와 PRODUCT-B 출고는 각각 3초 이내 완료되고 A 출고는 여전히 대기하다가 잠금 해제 후 성공하는지 확인합니다. 이 시간 제한은 테스트의 실패 탐지 기준이며 운영 성능 보장이 아닙니다.
-- 테스트에만 Hibernate 통계를 켜 조회 한 번의 prepared statement 수가 1이고 엔티티 로딩 수가 0인지 확인합니다. 일반 조회에 쓰기 잠금이 없다는 동작은 위 행 잠금 시나리오로 별도 검증합니다.
-- DB 지연 트리거로 재고 UPDATE 이후 출고 이력의 커밋을 실패시켜 수량·수정 시각·이력 롤백을 확인합니다. 실제 HTTP에서도 커밋 실패가 201이 아닌 500이며 부분 저장이 없는지 확인합니다.
-- HTTP 입고→출고→조회, 전량 출고, Long.MAX_VALUE 전량 출고, 재고 부족 409, 상품 없음 404, 재고 누락 500, JSON 타입·수량·경로 코드 검증과 UTC 시각을 검사합니다.
-
-3단계 완료 당시의 미검증 범위는 요청 추적, 잠금 시간 초과·데드락 분류와 응답, 혼합 입출고·동시 HTTP 변경, 애플리케이션 이미지·CI와 새 clone의 전체 실행입니다. 3단계에는 새 라이브러리·트랜잭션 전파 옵션·스키마 변경을 추가하지 않았습니다. 요청 추적과 잠금 오류의 후속 검증은 4단계 기록에 구분합니다.
-
-### 11. 4단계 검증 기록 (2026-11-12)
-
-환경과 DB 마이그레이션은 이전 단계와 동일합니다. 관련 단위·잠금 통합·HTTP 테스트를 개별 실행한 뒤 필터 없는 전체 검증을 실행했습니다.
-
-```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
-./gradlew --no-daemon check :inventory-api:bootJar
-```
-
-결과는 BUILD SUCCESSFUL입니다. 최종 검증은 단위 테스트의 변경 없는 결과를 재사용했고, PostgreSQL 통합·실제 HTTP 테스트 전체와 JAR 생성을 수행했습니다. 아래 집계는 이전 단계를 포함합니다.
-
-| 종류 | 결과 |
-| --- | --- |
-| 단위 | 67건 성공 (Core 49, API 18) |
-| PostgreSQL 통합 | 51건 성공 (스키마 13, 입고 18, 출고·조회 15, 잠금 설정·시간 초과 4, API 기동 1) |
-| 실제 HTTP E2E | 73건 성공 (기동 1, 입고 32, 출고·조회 31, 요청 추적·시간 초과 6, 데드락 3) |
-| 합계 | 191건, 최종 실패·오류·건너뜀 0건 |
-| 실행 JAR | 생성 성공. 애플리케이션 이미지·전체 Compose는 후속 단계 |
-
-- 기본 3초 설정은 실제 트랜잭션에서 `SHOW lock_timeout`으로 확인합니다. 업무 풀 크기 1에서 커밋·롤백·실제 시간 초과 후 같은 `pg_backend_pid()` 연결이 재사용되고 설정이 0으로 돌아오는지 검증합니다. 행 잠금과 신규 등록 UNIQUE 충돌의 `55P03`도 확인하며, 명시적인 다음 요청만 성공 이력을 추가합니다.
-- 위 테스트는 최초 기동에서 Flyway가 추가 마이그레이션 연결을 얻지 못해 4건 실패했습니다. 테스트에 한해 Flyway를 같은 PostgreSQL·같은 DDL의 별도 연결로 실행하도록 수정했습니다. 업무 풀 크기 1과 동일 물리 연결 확인을 유지했고 테스트를 비활성화하거나 기대값을 낮추지 않았습니다.
-- HTTP 시간 초과 검증은 테스트 설정 250ms를 사용합니다. 행 잠금·신규 등록 충돌뿐 아니라 재고 UPDATE 후 커밋 단계의 잠금 시간 초과를 유도하고, 503·수량·수정 시각·이력 롤백과 명시적 재요청을 검증합니다. 운영 기본 3초 검증은 위 Core 테스트와 구분합니다.
-- 실제 데드락 HTTP 테스트는 각 실행에서 3회 반복합니다. 테스트 전용 트리거가 두 번째 상품 잠금을 요청하게 하고, advisory 게이트와 `pg_blocking_pids`로 대기를 조율해 실제 순환 대기를 만듭니다. DB가 발생시킨 `40P01`이 HTTP 503·TRANSACTION_RETRY_REQUIRED로 변환되고 전체가 롤백되는지 확인합니다. 테스트의 HTTP 잠금 제한은 10초, 외부 경쟁 연결의 트랜잭션 한정 deadlock_timeout은 1시간으로 설정해 HTTP 측 감지기가 먼저 중단하도록 조율합니다. 실제로 1시간을 기다리는 테스트가 아니며 Future·대기·종료에는 별도 제한이 있습니다. 이 트리거·게이트·감지 설정은 운영 코드에 없습니다.
-- 요청 추적 단위 테스트는 정상·예외 종료의 MDC 복원을 검증합니다. HTTP에서는 시작 래치로 조율한 병렬 8개 요청의 헤더·오류 본문·완료 로그 ID가 각각 일치하고 중복되지 않는지 확인합니다. 같은 입고 본문을 두 번 보내면 ID도 새로 생기고 이력도 두 건인 것을 확인합니다.
-- 제약 위반의 500 응답과 SQL·내부 정보 비노출을 유지합니다. SQLSTATE 분류 단위 테스트는 다른 DB 오류를 503으로 바꾸지 않는지도 검사합니다.
-
-4단계 완료 당시의 미검증 범위는 혼합 입출고·동시 HTTP 변경의 정합성 보강, 애플리케이션 이미지·CI와 새 clone의 전체 실행입니다. 혼합 동시 요청의 후속 검증은 5단계 기록에 구분합니다. 운영 성능이나 정상 단일 상품 경로의 데드락 발생 빈도를 측정한 것은 아닙니다. 4단계에 새 라이브러리·자동 재시도·트랜잭션 전파 옵션·운영 스키마 변경은 추가하지 않았습니다.
-
-### 12. 5단계 검증 기록 (2026-11-12)
-
-운영 코드·설정·의존성·DDL은 변경하지 않고 관련 테스트와 문서만 보강했습니다. 환경은 macOS ARM64, Java 21.0.12.1, Gradle 8.8, Docker Engine 24.0.2, PostgreSQL 16.14 Linux ARM64로 이전 단계와 동일합니다. 단위·DB·HTTP 관련 테스트를 먼저 실행한 뒤 이전 빌드 결과를 지우고 전체 검증을 수행했습니다.
-
-```bash
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-GRADLE_USER_HOME=/private/tmp/deepfine-gradle-home \
-./gradlew --no-daemon clean check :inventory-api:bootJar
-```
-
-결과는 BUILD SUCCESSFUL이며 actionable task 19개가 모두 실행됐습니다. `clean`은 빌드 결과 정리이며 새 clone·앱 컨테이너 실행 검증과는 구분합니다. 집계는 앞선 테스트를 포함합니다.
-
-| 종류 | 결과 |
-| --- | --- |
-| 단위 | 68건 성공 (Core 50, API 18) |
-| PostgreSQL 통합 | 60건 성공 (스키마 13, 입고 18, 출고·조회·혼합 24, 잠금 설정·시간 초과 4, API 기동 1) |
-| 실제 HTTP E2E | 103건 성공 (기동 1, 입고 42, 출고·조회 39, 동시 신규·혼합 12, 요청 추적·시간 초과 6, 데드락 3) |
-| 합계 | 231건, 실패·오류·건너뜀 0건 |
-| 실행 JAR | 생성 성공 |
-
-혼합 요청은 작업자 8개·DB 풀 최대 8개, 입고 4개·출고 4개로 구성하고 아래 각 시나리오를 DB와 HTTP에서 각각 3회 반복합니다. 시작 래치는 트랜잭션·연결 획득 전에 해제합니다. 모든 결과·예외를 수집하고 시작 5초·전체 결과 수집 20초·종료 5초로 제한합니다. 의도하지 않은 시간 초과·503·DB 예외를 재고 부족으로 세지 않습니다.
-
-| 초기 재고 | 동시 요청 | 사전 기대 결과 |
+| 테이블 | 컬럼 | 자료형·제약 |
 | --- | --- | --- |
-| 100 | 입고 7×4, 출고 11×4 | 8건 성공, 최종 84, 초기 입고 포함 이력 9건 |
-| 2 | 입고 1×4, 출고 7×4 | 입고 4건 성공·출고 4건 실패, 최종 6, 이력 5건 |
-| 6 | 입고 1×4, 출고 3×4 | 입고 4건 성공, 출고 성공 S는 2 또는 3, 최종 10−3S, 이력 5+S건 |
+| product | id | BIGINT, GENERATED ALWAYS AS IDENTITY, PK |
+| product | product_code / name | VARCHAR(64) UNIQUE / VARCHAR(200) |
+| product | created_at / updated_at | TIMESTAMPTZ, DEFAULT CURRENT_TIMESTAMP |
+| inventory | product_id | BIGINT, PK이자 product.id FK |
+| inventory | quantity | BIGINT, DEFAULT 0, CHECK >= 0 |
+| inventory | updated_at | TIMESTAMPTZ, DEFAULT CURRENT_TIMESTAMP |
+| stock_movement | id | BIGINT, GENERATED ALWAYS AS IDENTITY, PK |
+| stock_movement | product_id | BIGINT, product.id FK |
+| stock_movement | movement_type | VARCHAR(10), CHECK IN ('INBOUND', 'OUTBOUND') |
+| stock_movement | quantity / quantity_after | BIGINT, CHECK > 0 / BIGINT, CHECK >= 0 |
+| stock_movement | created_at | TIMESTAMPTZ, DEFAULT CURRENT_TIMESTAMP |
 
-마지막 경우는 초기 재고로 최소 두 번 출고할 수 있고 총재고 10으로는 최대 세 번만 출고할 수 있습니다. 실패한 출고를 재시도하지 않으므로 실행 순서에 따라 S가 달라질 수 있습니다. 이 사전 범위와 정확한 계산식을 검사하며 실행 결과를 보고 기대 건수를 바꾸지 않습니다.
+- JPA의 `ddl-auto=validate`는 테이블·컬럼 매핑을 검사하며 스키마를 자동 변경하지 않습니다. UNIQUE·FK·CHECK 등 제약의 실제 동작은 PostgreSQL 통합 테스트로 별도 확인합니다. `open-in-view=false`로 HTTP 응답 처리까지 영속성 컨텍스트를 열어두지 않습니다.
+- DB 생성 시각은 `TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP`를 사용해 네이티브 상품·재고 INSERT에도 채웁니다. 이 기본값이 없으면 시각을 생략한 INSERT는 NOT NULL 제약으로 실패합니다. 대안은 모든 INSERT에서 시각을 명시하는 방식입니다. `CURRENT_TIMESTAMP`는 트랜잭션 시작 시각이며 커밋 순서를 뜻하지 않습니다. 수정 시각 자동 갱신 트리거는 없으며 재고 엔티티의 입출고 메서드가 `updatedAt`을 갱신합니다. 이력의 `createdAt`은 JPA 저장 전 애플리케이션에서 채웁니다. JDBC의 시각 변환 기준은 UTC입니다.
+- inventory의 PK는 상품당 재고 중복을 막고 FK는 참조 무결성만 보장합니다. 모든 상품에 재고가 존재하는 것은 입고 서비스가 한 트랜잭션으로 보장합니다. 기존 상품의 재고 누락은 500으로 처리하며 자동 복구하지 않습니다.
+- 연쇄 삭제는 사용하지 않습니다. 초기 인덱스는 PK·상품 코드 UNIQUE에 필요한 것만 두며 이력 조회 API는 제공하지 않습니다. 입출고 이력의 수정·삭제 API도 없지만 DB 직접 변경까지 막는 감사 저장소는 아닙니다.
 
-검증은 최종 수량 외에도 상품·재고 각각 한 행, 성공 응답의 ID·유형·수량·변경 후 수량·시각과 저장된 이력 행의 일치, 실패 요청의 이력 부재를 검사합니다. 테스트 전용 지연 트리거는 각 이력의 quantity_after가 커밋 직전 같은 트랜잭션에서 반영된 재고와 일치하는지 확인합니다. ID나 시각을 커밋 순서로 가정해 혼합 이력을 정렬하지 않습니다.
+### 8. 검증 결과와 실행 범위
 
-HTTP에서는 같은 신규 코드에 2개씩 8건 동시 입고하는 시나리오도 3회 반복해 상품·재고 각각 한 행, 최종 16, 이력 8건을 확인합니다. 성공·실패 응답의 요청 ID가 중복되지 않고 오류 본문과 헤더가 일치하는지 검사하며, 완료 후 조회 API의 수량·재고 변경 시각을 DB와 대조합니다.
+최신 전체 테스트는 6단계에서 `./gradlew --no-daemon clean check`로 실행했습니다. Linux ARM64 / Temurin 21.0.13+9 / PostgreSQL 16.14에서 단위 68건·DB 통합 60건·실제 HTTP E2E 103건, **총 231건 성공**, 실패·오류·건너뜀 0건입니다. 17개 actionable task가 모두 실행됐습니다. 이전 단계에는 macOS ARM64 / Java 21.0.12.1에서도 전체 테스트를 수행했습니다.
 
-경계값은 고정 시드 20261112의 BigInteger 모델로 256개 입출고 연산을 검증하는 단위 테스트 1건을 추가했습니다. 이 모델은 long 덧셈과 독립적으로 기대 수량을 계산하고 거부 시 수량·수정 시각 보존도 확인합니다. HTTP에서는 Long 최솟값 미만, 지수 표기 1e0, 배열·객체 수량, boolean·소수 상품 코드/이름, 짝이 맞지 않는 하위 서로게이트 거부를 보강했습니다. 상품 코드 64자와 Long.MAX_VALUE의 조합, 65자 입고·출고 거부도 확인합니다.
+| 구분 | 확인한 범위 | 한계 |
+| --- | --- | --- |
+| 단위 | 입력·유니코드·재고 규칙·long 경계, BigInteger 모델 256연산 | Spring·DB 정합성의 근거로 사용하지 않음 |
+| PostgreSQL 통합 | 실제 DDL 제약·신규 등록 경쟁·입출고·혼합 요청·롤백·행 잠금·연결 설정 복원 | PostgreSQL 16.14에서 검증, H2 사용 안 함 |
+| 실제 HTTP E2E | 실제 서버·DB에서 입력·업무 오류·동시 변경·requestId·잠금 시간 초과·데드락·커밋 실패 | Mock 업무 경로로 대체하지 않음 |
+| Compose | 소스 이미지 빌드·Flyway·입출고·조회·오류·재시작·컨테이너 재생성 후 보존 | Linux ARM64 실행, 최종 재검증은 동일 소스 Docker 빌드 캐시 사용 |
+| CI | check와 Compose 검증 workflow 구성, YAML 구문 확인 | 원격 GitHub Actions 실행·AMD64 실행 미검증 |
 
-5단계 완료 당시 남은 검증은 애플리케이션 이미지·전체 Compose, CI와 새 clone에서의 전체 실행이었습니다. 이미지·Compose 후속 결과는 아래 6단계 기록에 구분합니다. 반복 테스트는 이 환경의 시나리오 검증이며 모든 실행 순서나 운영 성능을 보장하지 않습니다.
+동시성 시나리오는 작업자 8개·최대 DB 풀 8개로 독립 트랜잭션을 사용하고 각 3회 반복합니다. 시작 조율·모든 결과와 예외 수집·제한된 대기 후 최종 수량, 성공·실패 수, 이력 수와 응답별 이력 일치를 확인합니다. 충분한 재고와 부족한 재고, 순서에 따라 성공 수가 달라지는 혼합 요청을 구분합니다. 자동 ID·시각을 커밋 순서로 가정하지 않습니다.
 
-### 13. 이미지·CI 구성과 6단계 검증 기록 (2026-11-12)
+롤백 테스트는 테스트 DB의 지연 트리거로 재고 UPDATE 후 커밋 실패를 주입합니다. 기존 재고·수정 시각·이력 복원과 신규 상품·재고·이력 전체 취소, HTTP 500·503 응답을 확인합니다. 운영 스키마에는 오류 주입 트리거가 없습니다. Compose의 재고 부족 거부는 저장 실패 시 롤백 검증과 구분합니다.
 
-`Dockerfile`은 Temurin 21.0.13+9의 JDK 빌드 단계와 JRE 실행 단계를 분리합니다. 정확한 태그와 이미지 digest를 고정하고, Gradle Wrapper로 소스에서 `:inventory-api:bootJar`를 실행한 뒤 실행 JAR만 최종 이미지에 복사합니다. 호스트 빌드 결과나 JDK에 의존하지 않기 위한 구성입니다. `.dockerignore`는 빌드 결과·로컬 환경 파일·계획 문서를 제외합니다. 최초 빌드는 이미지·Gradle·의존성 다운로드가 필요하며 네트워크나 컴파일 오류가 있으면 실패합니다. 대안인 호스트 JAR 복사 방식은 빌드 환경을 따로 준비하고 산출물이 최신인지 관리해야 합니다.
+실행 명령·환경·시나리오와 최초 실패 및 수정 기록은 [단계별 검증 기록](docs/verification-history.md)에 보존합니다. 테스트 통과는 모든 실행 순서·운영 처리량·사용자의 설계 이해를 보장하지 않습니다. 원격 push와 원격 clone 검증은 수행하지 않았습니다.
 
-Compose는 `depends_on: condition: service_healthy`로 DB 준비를 기다린 다음 API를 시작합니다. API 연결 주소는 호스트의 localhost 대신 Compose 서비스명 `db`입니다. 이 순서만으로 Flyway·JPA 검증·HTTP 준비가 보장되지는 않으므로 검증 스크립트는 실제 조회 경로를 제한된 횟수로 확인합니다. 입출고 요청은 자동 재전송하지 않습니다. 실행 이미지는 JDK 대신 JRE만 사용하며 Java 소스 컴파일은 빌드 단계의 책임입니다.
+7단계에서는 로컬 커밋 `f276062`를 새 임시 경로에 clone하고 변경한 문서를 적용해 curl 예시 6개를 실제 검증했습니다. 순서대로 201·201·200·409·404·400, 응답 필드·요청 ID·한글 상품명·재고 7·성공 이력 2건을 확인했습니다. `stop/start`와 `down/up` 후에도 같은 상태를 확인하고 검증 프로젝트만 정리했습니다. 기존 환경과 분리하려고 고유 Compose 프로젝트·임의 호스트 포트를 사용했고 Docker 빌드 캐시를 재사용했습니다. Gradle은 `--offline check --dry-run`으로 세 테스트 작업의 연결만 확인했으며 이번 단계에서 전체 테스트를 다시 실행하지 않았습니다. 업무 코드·설정·의존성·DDL은 6단계와 같습니다.
 
-`.github/workflows/ci.yaml`은 main push·pull request·수동 실행에서 `ubuntu-24.04`, Temurin 21.0.13+9로 `./gradlew --no-daemon clean check`와 `./scripts/verify-compose.sh`를 순서대로 수행합니다. 두 명령 중 하나라도 실패하면 작업이 실패합니다. actions/checkout과 actions/setup-java는 커밋 SHA로 고정하고 저장소 권한은 읽기만 부여합니다. 수동 검증만 하는 대안보다 반복 실행 절차를 저장소에 남길 수 있지만, GitHub runner의 Docker·네트워크 상태에도 의존합니다. 원격 실행 결과와 로컬 검증 결과는 구분합니다.
+## 이미지와 CI
 
-검증 호스트는 macOS ARM64, Docker Desktop 4.20.1 / Engine 24.0.2, Compose 2.18.1입니다. 앱 빌드·실행과 아래 전체 테스트는 Linux ARM64의 Temurin 21.0.13+9, PostgreSQL 16.14에서 수행했습니다. 앞선 단계의 호스트 Java 21.0.12.1과 패치 버전이 다릅니다. 새 라이브러리·업무 코드·DDL·트랜잭션 옵션은 추가하거나 변경하지 않았습니다.
+`Dockerfile`은 digest로 고정한 Temurin 21.0.13+9의 JDK에서 소스를 빌드하고, JRE 단계에는 실행 JAR만 복사합니다. 호스트 JDK·기존 빌드 산출물에 의존하지 않기 위한 구성입니다. 호스트에서 JAR를 빌드해 복사하는 대안은 호스트 빌드 환경과 산출물 최신 여부를 별도로 관리해야 합니다. 최초 빌드는 이미지·Gradle·의존성 다운로드가 필요하며 네트워크·컴파일 오류가 있으면 실패합니다.
 
-로컬 설정·계획서·기존 빌드 결과를 제외한 Git tree를 별도 임시 경로에 내보내 검증했습니다. 최초 이미지 빌드에서 이미지 내부 소스 컴파일과 실행 JAR 생성에 성공했고, 최종 소스 사본의 Compose 재검증에서는 동일 소스의 Docker 빌드 캐시를 사용했습니다. 캐시 없는 모든 재다운로드나 원격 clone을 검증했다는 뜻은 아닙니다.
+Compose의 DB healthcheck는 DB 접속 준비를 확인합니다. API는 이후 Flyway·JPA 검증을 거쳐 기동하므로 `depends_on`이나 `up --wait`만으로 HTTP 준비를 판단하지 않습니다. [검증 스크립트](scripts/verify-compose.sh)가 실제 조회 경로를 제한된 횟수로 확인하고 입출고는 한 번씩만 전송합니다.
 
-실제 실행한 핵심 명령은 다음과 같습니다. 테스트용 빌드 이미지를 별도로 내보낸 뒤 Docker 소켓을 연결해 Testcontainers가 PostgreSQL을 만들도록 했습니다. `TESTCONTAINERS_HOST_OVERRIDE`는 Docker Desktop의 테스트 컨테이너에서 호스트에 공개된 DB 포트로 접근하기 위한 검증용 값이며 앱 설정에 추가하지 않았습니다.
-
-```bash
-docker build --target build --tag deepfine-stage6-test-builder:trhwxf .
-docker run --name deepfine-stage6-test-trhwxf \
-  --volume /var/run/docker.sock:/var/run/docker.sock \
-  --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
-  deepfine-stage6-test-builder:trhwxf \
-  ./gradlew --no-daemon clean check
-
-# Git 소스 사본에서 실행
-./scripts/verify-compose.sh
-```
-
-| 검증 | 결과 |
-| --- | --- |
-| Linux 전체 Gradle 검증 | BUILD SUCCESSFUL, 3분 37초, actionable task 17개 모두 실행 |
-| 단위 / PostgreSQL 통합 / 실제 HTTP E2E | 68 / 60 / 103건 성공, 합계 231건, 실패·오류·건너뜀 0건 |
-| 최종 실행 이미지 | JRE 21.0.13+9와 `/app/app.jar` 확인, `/workspace`·javac 부재 확인 |
-| Compose 초기 기동 | 새 격리 볼륨, PostgreSQL 16.14, Flyway V1 성공 기록과 실제 HTTP 준비 확인 |
-| Compose 업무·추적 | 입고 10 → 출고 3 → 조회 7, 초과 출고 409·INSUFFICIENT_STOCK, 요청 ID 헤더·오류 본문 일치 |
-| Compose 저장 상태 | 상품·재고 각 1행, 재고 7, 성공 이력 2행 및 이력 합계 7 |
-| Compose 데이터 보존 | DB·API 재시작 후와 `down` → `up` 재생성 후 같은 HTTP·DB 상태 확인 |
-| 검증 자원 정리 | 고유 프로젝트의 컨테이너·네트워크·볼륨 정리 성공, 기존 볼륨 3개 유지 확인 |
-| 정적 확인 | `bash -n`, workflow YAML 구문 파싱, Compose config 확인 성공. GitHub Actions 실행 검증과는 구분 |
-
-Compose의 초과 출고 검사는 변경 전 거부와 이력 부재를 확인합니다. 저장 실패 시 롤백은 별도의 PostgreSQL 통합·HTTP 테스트가 검증하며 두 시나리오를 혼동하지 않습니다. 테스트 결과 XML을 회수해 위 집계를 확인했고 검증용 테스트 컨테이너는 결과 회수 후 제거했습니다.
-
-원격 push를 하지 않았으므로 GitHub Actions의 Ubuntu 24.04 / AMD64 실행, 원격 저장소의 새 clone 실행은 미검증입니다. 로컬 Linux ARM64 통과를 원격 CI 통과로 주장하지 않습니다. 최종 문서 대조와 사용자의 설계 설명 확인은 다음 단계에 남아 있습니다.
+[CI workflow](.github/workflows/ci.yaml)는 main push·pull request·수동 실행에서 Ubuntu 24.04 / Temurin 21.0.13+9로 `./gradlew --no-daemon clean check`와 `./scripts/verify-compose.sh`를 실행합니다. 어느 명령이든 실패하면 작업이 실패합니다. checkout·setup-java는 커밋 SHA로 고정하고 저장소 읽기 권한만 부여합니다. 현재는 로컬 검증 결과이며 원격 CI 성공을 주장하지 않습니다.
 
 ## 입고 처리와 트랜잭션
 
 1. HTTP DTO를 Core의 `InboundCommand`로 변환하며 입력 검증·상품명 정규화를 끝냅니다. `@Valid`는 누락·null·양수 조건을 HTTP 경계에서 검사하고, Core도 직접 호출에 대비해 업무 입력을 검사합니다. Jackson은 소수·숫자 문자열을 정수로, 숫자·boolean을 문자열로 자동 변환하지 않도록 명시합니다. 이 설정이 없으면 잘못된 JSON 타입이 변환 후 유효한 값처럼 보일 수 있습니다.
 2. Controller가 Spring 프록시를 통해 공개 `StockService.inbound()`를 호출합니다. `@Transactional`의 기본 REQUIRED로 상품·재고·이력을 하나의 트랜잭션에 묶고, Hikari의 READ COMMITTED 설정을 사용합니다. 내부 직접 호출에 트랜잭션 생성을 기대하지 않으며 REQUIRES_NEW·MANDATORY·자동 재시도는 사용하지 않습니다.
 3. 상품을 조회하고 없을 때만 `INSERT ... ON CONFLICT(product_code) DO NOTHING`을 실행한 다음 **별도 SELECT**로 읽습니다. READ COMMITTED에서 충돌 INSERT가 기다린 트랜잭션의 행을 최초 명령 스냅샷으로 읽을 수 있다고 가정하지 않습니다. [PostgreSQL 격리 수준 설명](https://www.postgresql.org/docs/16/transaction-iso.html)을 기준으로 실제 대기 테스트를 수행합니다.
-4. 정규화한 이름이 일치하면 신규 등록 경로에서만 재고 0 행을 `ON CONFLICT(product_id) DO NOTHING`으로 확보합니다. 기존 상품의 재고 누락을 자동 복구하면 데이터 불일치를 숨길 수 있으므로 오류로 처리합니다. PostgreSQL 전용 충돌 구문은 Repository에 두고 값을 바인딩합니다. JPQL이 이 충돌 구문을 제공하지 않아 이 두 INSERT만 네이티브 SQL입니다.
+4. 정규화한 이름이 일치하면 신규 등록 경로에서만 재고 0 행을 `ON CONFLICT(product_id) DO NOTHING`으로 확보합니다. 기존 상품의 재고 누락을 자동 복구하면 데이터 불일치를 숨길 수 있으므로 오류로 처리합니다. JPQL이 제공하지 않는 PostgreSQL 충돌 처리 INSERT와 아래 lock_timeout 설정에 네이티브 SQL을 사용하며 Repository에 두고 값을 바인딩합니다.
 5. `@Lock(PESSIMISTIC_WRITE)` 조회로 재고 행의 쓰기를 조율합니다. 재고를 일반 조회한 뒤 다시 잠그는 흐름이 없어 영속성 컨텍스트의 오래된 수량을 사용하는 것을 피합니다. `Inventory.inbound()`는 양수·오버플로를 검사한 후에만 수량과 수정 시각을 바꿉니다. `Long.MAX_VALUE - 현재 수량`과 비교하므로 덧셈 자체가 먼저 오버플로하지 않습니다.
-6. 변경 후 수량을 이력에 기록하고 JPA 변경 감지를 통해 함께 커밋합니다. IDENTITY ID를 받았다는 것만으로 성공 응답을 보내지 않으며 Service 프록시의 커밋까지 성공한 후 201을 반환합니다. 실패 시 이력뿐 아니라 신규 상품·재고와 기존 재고 변경도 롤백됩니다.
+6. 변경 후 수량을 이력에 기록하고 JPA 변경 감지를 통해 함께 커밋합니다. IDENTITY ID를 받았다는 것만으로 성공 응답을 보내지 않으며 Service 프록시의 커밋까지 성공한 후 201을 반환합니다. 업무 예외는 RuntimeException이고 DB 예외도 삼키지 않으므로 현재 예외 경로에서는 이력뿐 아니라 신규 상품·재고와 기존 재고 변경도 롤백됩니다.
 
 JPA 엔티티는 `@Entity`·`@Table`·`@Column`으로 DDL과 매핑하고 IDENTITY를 DB 자동 생성 ID에 대응시킵니다. 이력 유형은 `@Enumerated(STRING)`으로 저장해 enum 순서에 의존하지 않습니다. 참조 ID만 보유하고 불필요한 양방향 관계·이력 컬렉션은 만들지 않았습니다. API는 엔티티 대신 별도의 record 응답을 반환합니다.
 
@@ -448,7 +319,7 @@ JPA 엔티티는 `@Entity`·`@Table`·`@Column`으로 DDL과 매핑하고 IDENTI
 
 출고는 별도의 공개 `StockService.outbound()`에 기본 `@Transactional`을 적용합니다. 상품이 없으면 404에 해당하는 업무 예외를 내고, 상품은 있지만 재고가 없으면 내부 불일치로 처리합니다. 입고와 동일한 `PESSIMISTIC_WRITE` 조회로 재고를 처음 읽고, `Inventory.outbound()`가 양수·잔여 수량을 검사한 뒤에만 차감합니다. 이력 수량은 양수이고 유형이 OUTBOUND이며 재고·수정 시각·이력은 함께 커밋하거나 롤백합니다.
 
-쓰기 잠금 없이 수량을 읽어 검사한 다음 차감하면 여러 요청이 같은 수량을 통과할 수 있습니다. 현재 구현은 같은 재고 행의 쓰기를 조율합니다. 대안은 조건부 UPDATE의 영향 행 수를 검사하는 방식이나 낙관적 잠금이며, 후자는 충돌 응답·재시도 정책이 필요합니다. 새로운 잠금 전략이나 재시도는 추가하지 않았습니다.
+쓰기 잠금 없이 재고 5를 두 요청이 읽고 각각 3을 출고하면 둘 다 검사를 통과해 재고 2를 덮어쓰고 이력에는 총 6이 출고될 수 있습니다. CHECK >= 0만으로는 이 상황을 막을 수 없습니다. 현재는 같은 재고 행을 잠근 요청이 커밋·롤백할 때까지 다른 변경이 기다리고, 대기 후 읽은 수량으로 다시 업무 검사를 합니다. 대안은 조건부 UPDATE의 영향 행 수를 검사하는 방식이나 낙관적 잠금이며, 후자는 충돌 응답·재시도 정책이 필요합니다.
 
 조회는 `InventoryQueryService`가 상품 코드 검증 후 한 번의 LEFT JOIN SELECT로 record 프로젝션을 반환합니다. INNER JOIN은 재고가 누락된 상품을 미등록 상품과 구분하기 어렵기 때문에 사용하지 않았습니다. 조회용 `StockSnapshot.quantity`는 조인 누락을 감지할 수 있도록 Long이며, 서비스에서 null을 검사한 후 성공 응답의 long 수량으로 변환합니다.
 
@@ -471,8 +342,14 @@ JPA 엔티티는 `@Entity`·`@Table`·`@Column`으로 DDL과 매핑하고 IDENTI
 ## 범위와 한계
 
 - 단일 고객사·창고 구분 없는 상품별 총재고를 관리합니다.
-- 상품 수정·삭제, 입출고 이력 수정·삭제, 관리자 화면은 제외합니다.
+- 상품 수정·삭제, 입출고 이력 조회·수정·삭제, 관리자 화면, 인증·권한은 제외합니다.
 - 요청 재전송을 막는 멱등성과 자동 재시도는 제외합니다. 같은 입출고 요청을 두 번 보내면 별개의 작업입니다.
 - 커밋 이후 응답이 유실되면 재요청으로 중복 반영될 수 있습니다. 향후 멱등성 키 기반 처리를 검토할 수 있습니다.
 - requestId는 요청 추적용이며 중복 처리 방지 키가 아닙니다.
 - 창고·옵션·멀티테넌트는 향후 확장 검토 사항이며 현재 지원 기능이 아닙니다.
+
+같은 상품으로 요청이 몰리면 한 재고 행의 잠금이 병목이 될 수 있습니다. 잠금 대기 제한은 무한 대기를 줄이기 위한 값이며 처리량 개선이나 공정한 실행 순서를 보장하지 않습니다. 트랜잭션에서 잠금을 보유한 채 외부 서비스를 호출하지 않습니다. 운영 부하·처리량과 장애 시 복구 시간은 측정하지 않았습니다.
+
+향후 창고별 재고가 필요하면 재고 식별자를 `(product_id, warehouse_id)` 등으로 확장하고 잠금 대상·이력의 창고 정보·전체 합계 조회 의미를 함께 정해야 합니다. 테이블을 분리했다는 이유만으로 현재 코드가 창고를 지원하는 것은 아닙니다.
+
+향후 멱등성을 추가한다면 업무 요청 키와 입력 내용, 처리 결과를 재고 변경과 원자적으로 저장하고 같은 키의 동시 요청·다른 본문·응답 유실 정책을 정해야 합니다. requestId만 재사용하거나 단순 자동 재시도를 추가하는 것으로 해결되지 않습니다. 이 확장들은 현재 구현·검증 범위에 포함하지 않습니다.
