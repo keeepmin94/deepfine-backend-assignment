@@ -22,10 +22,6 @@ Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL
 
 Gradle 의존성은 `inventory-api → inventory-core`입니다. 모듈을 나누지만 실행 애플리케이션과 DB는 각각 하나입니다. Controller는 HTTP 경계, Service는 트랜잭션 조율, Entity는 재고 규칙, Repository는 DB 접근을 담당합니다. Core는 JPA에 의존하며 HTTP DTO·상태 코드는 API 모듈에 둡니다. 구체적인 필요가 없는 서비스 인터페이스나 도메인·영속성 모델 중복은 만들지 않았습니다.
 
-컨트롤러 2개와 서비스 2개는 `private final` 의존성 필드와 Lombok의 [RequiredArgsConstructor](https://projectlombok.org/features/constructor)로 생성자 주입을 구성합니다. 컴파일 때 필드 순서대로 생성자를 만들어 반복 대입 코드를 줄입니다. 직접 생성자를 작성하는 것도 같은 주입 방식의 대안입니다. Lombok은 `compileOnly`와 `annotationProcessor`에만 추가하며, 별도 구성인 annotationProcessor에도 같은 Boot BOM을 적용합니다. processor 설정이 없으면 생성자가 만들어지지 않아 현재 final 필드를 초기화하는 코드가 컴파일되지 않습니다. 실행 시 Lombok JAR는 필요하지 않습니다.
-
-`PostgresTransactionRepository`는 생성자에서 `@Value` 설정 주입·양수 검사·밀리초 단위 문자열 변환을 수행하므로 명시적 생성자를 유지합니다. 이를 단순 자동 생성자로 대체하면 같은 초기화 동작이 보존되지 않습니다. JPA 엔티티·예외·record의 생성자는 각각의 생성·검증 책임을 유지합니다.
-
 Java 파일은 역할별 하위 패키지로 분류합니다. 아래 경로는 API의 `com.deepfine.inventory.api`, Core의 `com.deepfine.inventory.core` 아래를 기준으로 하며 파일명에서 `.java`는 생략했습니다.
 
 | 모듈 | 하위 패키지 경로 | 클래스 |
