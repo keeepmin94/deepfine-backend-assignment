@@ -24,7 +24,8 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<Object> handleStockException(StockException exception, HttpServletRequest request) {
         HttpStatus status = switch (exception.code()) {
             case INVALID_REQUEST -> HttpStatus.BAD_REQUEST;
-            case PRODUCT_NAME_MISMATCH, STOCK_LIMIT_EXCEEDED -> HttpStatus.CONFLICT;
+            case PRODUCT_NOT_FOUND -> HttpStatus.NOT_FOUND;
+            case PRODUCT_NAME_MISMATCH, STOCK_LIMIT_EXCEEDED, INSUFFICIENT_STOCK -> HttpStatus.CONFLICT;
             case INTERNAL_ERROR -> HttpStatus.INTERNAL_SERVER_ERROR;
         };
         if (status.is5xxServerError()) {

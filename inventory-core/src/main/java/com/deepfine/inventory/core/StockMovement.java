@@ -39,9 +39,17 @@ public class StockMovement {
     }
 
     static StockMovement inbound(long productId, long quantity, long quantityAfter) {
+        return create(productId, MovementType.INBOUND, quantity, quantityAfter);
+    }
+
+    static StockMovement outbound(long productId, long quantity, long quantityAfter) {
+        return create(productId, MovementType.OUTBOUND, quantity, quantityAfter);
+    }
+
+    private static StockMovement create(long productId, MovementType type, long quantity, long quantityAfter) {
         var movement = new StockMovement();
         movement.productId = productId;
-        movement.movementType = MovementType.INBOUND;
+        movement.movementType = type;
         movement.quantity = quantity;
         movement.quantityAfter = quantityAfter;
         movement.createdAt = Instant.now().truncatedTo(ChronoUnit.MICROS);

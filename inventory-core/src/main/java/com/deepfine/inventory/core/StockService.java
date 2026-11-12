@@ -39,6 +39,19 @@ public class StockService {
                 movement.getQuantity(), movement.getQuantityAfter(), movement.getCreatedAt());
     }
 
+    @Transactional
+    public StockMovementResult outbound(OutboundCommand command) {
+        Product product = productRepository.findByProductCode(command.productCode())
+                .orElseThrow(() -> new StockException(StockErrorCode.PRODUCT_NOT_FOUND));
+        Inventory inventory = inventoryRepository.findForUpdate(product.getId())
+                .orElseThrow(() -> new StockException(StockErrorCode.INTERNAL_ERROR));
+        inventory.outbound(command.quantity());
+        StockMovement movement = movementRepository.save(
+                StockMovement.outbound(product.getId(), command.quantity(), inventory.getQuantity()));
+        return new StockMovementResult(movement.getId(), product.getProductCode(), movement.getMovementType(),
+                movement.getQuantity(), movement.getQuantityAfter(), movement.getCreatedAt());
+    }
+
     private void requireMatchingName(Product product, String name) {
         if (!product.getName().equals(name)) {
             throw new StockException(StockErrorCode.PRODUCT_NAME_MISMATCH);

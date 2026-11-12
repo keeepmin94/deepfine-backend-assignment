@@ -24,4 +24,10 @@ public class StockController {
         var result = stockService.inbound(request.toCommand());
         return ResponseEntity.status(HttpStatus.CREATED).body(MovementResponse.from(result));
     }
+
+    @PostMapping("/outbounds")
+    public ResponseEntity<MovementResponse> outbound(@Valid @RequestBody OutboundRequest request) {
+        var result = stockService.outbound(request.toCommand());
+        return ResponseEntity.status(HttpStatus.CREATED).body(MovementResponse.from(result));
+    }
 }

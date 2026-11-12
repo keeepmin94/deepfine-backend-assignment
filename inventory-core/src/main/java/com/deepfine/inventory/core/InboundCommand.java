@@ -1,13 +1,10 @@
 package com.deepfine.inventory.core;
 
-import java.util.regex.Pattern;
-
 public record InboundCommand(String productCode, String name, long quantity) {
 
-    private static final Pattern PRODUCT_CODE = Pattern.compile("[A-Z0-9_-]{1,64}");
-
     public InboundCommand {
-        if (productCode == null || !PRODUCT_CODE.matcher(productCode).matches() || name == null || quantity <= 0) {
+        ProductCodeValidator.requireValid(productCode);
+        if (name == null || quantity <= 0) {
             throw new StockException(StockErrorCode.INVALID_REQUEST);
         }
         name = name.strip();

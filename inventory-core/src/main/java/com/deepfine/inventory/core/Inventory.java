@@ -43,6 +43,17 @@ public class Inventory {
         return quantity;
     }
 
+    public void outbound(long quantity) {
+        if (quantity <= 0) {
+            throw new StockException(StockErrorCode.INVALID_REQUEST);
+        }
+        if (quantity > this.quantity) {
+            throw new StockException(StockErrorCode.INSUFFICIENT_STOCK);
+        }
+        this.quantity -= quantity;
+        this.updatedAt = Instant.now();
+    }
+
     public Instant getUpdatedAt() {
         return updatedAt;
     }

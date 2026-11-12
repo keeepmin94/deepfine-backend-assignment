@@ -10,6 +10,14 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     Optional<Product> findByProductCode(String productCode);
 
+    @Query("""
+            SELECT new com.deepfine.inventory.core.StockSnapshot(
+                product.id, product.productCode, product.name, inventory.quantity, inventory.updatedAt)
+            FROM Product product LEFT JOIN Inventory inventory ON inventory.productId = product.id
+            WHERE product.productCode = :productCode
+            """)
+    Optional<StockSnapshot> findStockSnapshot(@Param("productCode") String productCode);
+
     @Modifying
     @Query(value = """
             INSERT INTO product (product_code, name) VALUES (:productCode, :name)
