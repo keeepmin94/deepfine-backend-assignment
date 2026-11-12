@@ -1,6 +1,6 @@
 # DeepFine Backend Assignment — Inventory API
 
-재고 관리 MVP 과제입니다. 입고·출고·재고 조회 API, 요청 추적, 잠금 오류 처리를 구현하고 경계값·혼합 동시 입출고·실제 HTTP 검증을 보강했습니다. 애플리케이션 이미지·전체 Compose·CI는 후속 단계입니다.
+재고 관리 MVP 과제입니다. 입고·출고·재고 조회 API, 요청 추적, 잠금 오류 처리를 구현했습니다. Dockerfile·전체 Compose·CI 워크플로를 제공하며 실행 검증 범위는 단계별 기록에 구분합니다.
 
 ## 구현 범위
 
@@ -34,16 +34,15 @@ Java 21, Spring Boot 3.3.0, JPA, PostgreSQL 16.14, Gradle 8.8 Wrapper(Groovy DSL
 
 ## 실행·DDL·검증
 
-> 현재 Compose에는 DB만 포함됩니다. 애플리케이션은 Java 21로 로컬 실행합니다. 애플리케이션 이미지·전체 Compose 실행·CI는 후속 단계에서 구성합니다.
+Compose로 API 한 개와 PostgreSQL 한 개를 실행합니다. 이미지 내부의 JDK 21에서 소스를 빌드하므로 이 방식에는 호스트 JDK·Gradle·PostgreSQL 설치가 필요하지 않습니다. 로컬 Gradle 테스트·IDE 실행에는 JDK 21이 필요합니다.
 
 ### 1. 준비 사항
 
 - Git
 - Docker와 Docker Compose v2: Docker 엔진이 실행 중이어야 합니다.
+- 검증 스크립트 실행 시 Bash·curl
 - 로컬에서 Gradle 테스트를 실행할 경우 JDK 21
 - 최초 실행 시 이미지와 의존성을 내려받을 수 있는 네트워크 환경
-
-현재는 로컬 JDK 21이 필요하고 PostgreSQL의 로컬 설치는 필요하지 않습니다. Docker 엔진은 실행 중이어야 합니다.
 
 ### 2. 저장소 내려받기
 
@@ -52,7 +51,7 @@ git clone https://github.com/keeepmin94/deepfine-backend-assignment.git
 cd deepfine-backend-assignment
 ```
 
-이후 명령은 저장소 최상위 디렉터리에서 실행합니다. 공개 저장소이므로 SSH 키 설정이 필요 없는 HTTPS 주소를 사용합니다.
+이후 명령은 저장소 최상위 디렉터리에서 실행합니다. HTTPS 주소를 사용하며 저장소 접근에 필요한 GitHub 인증은 별도로 준비합니다.
 
 ### 3. 환경 설정 및 실행
 
@@ -63,31 +62,32 @@ docker version
 docker compose version
 ```
 
-환경 설정 예시를 복사하고 로컬 개발용 비밀번호를 변경합니다. `.env`는 Git에 올리지 않습니다. Compose는 `.env`를 읽지만 Java 애플리케이션은 자동으로 읽지 않으므로 별도로 환경변수를 전달해야 합니다.
+환경 설정 예시를 복사하고 로컬 개발용 비밀번호를 변경합니다. `.env`는 Git에 올리지 않습니다. Compose는 `.env`를 읽어 필요한 값만 각 컨테이너의 환경변수로 전달합니다.
 
 ```bash
 cp .env.example .env
-docker compose up -d --wait
+docker compose up --build -d --wait
 docker compose ps
-docker compose logs -f db
+docker compose logs -f api db
 ```
 
-DB는 `postgres:16.14` 이미지를 사용하며 `pg_isready` healthcheck가 성공할 때까지 기다립니다. 로그 확인은 `Ctrl+C`로 종료할 수 있으며 DB는 계속 실행됩니다. `pg_isready`는 DB 접속 준비 확인이며 애플리케이션 스키마 검증은 아닙니다.
+DB는 `postgres:16.14` 이미지를 사용하며 API는 DB의 `pg_isready` healthcheck 성공 후 시작합니다. 로그 확인은 `Ctrl+C`로 종료할 수 있으며 컨테이너는 계속 실행됩니다. DB healthcheck나 API 컨테이너가 running인 것만으로 API 검증 완료를 판단하지 않고 시작 로그·HTTP 호출 또는 아래 검증 스크립트로 확인합니다. Flyway와 JPA 스키마 검증은 API 기동 시 수행합니다.
 
 | 환경변수 | 기본값·의미 |
 | --- | --- |
 | POSTGRES_USER | inventory |
 | POSTGRES_PASSWORD | 필수. 예제 값은 로컬 개발용이며 실제 비밀정보가 아닙니다. |
 | DB_PORT | 5432. DB 호스트 포트이며 127.0.0.1에만 바인딩합니다. |
-| DB_URL | jdbc:postgresql://localhost:5432/inventory |
-| SERVER_PORT | 8080 |
+| DB_URL | 로컬 앱용 jdbc:postgresql://localhost:5432/inventory. Compose API에는 db:5432 주소를 별도로 전달합니다. |
+| SERVER_PORT | 호스트 API 포트 8080. Compose 컨테이너 내부는 8080으로 고정합니다. |
 | STOCK_LOCK_TIMEOUT_MS | 3000. 입출고 트랜잭션의 잠금 획득 대기 제한(ms). 양의 int 값만 허용합니다. |
 
-DB 이름은 `inventory`입니다. `DB_PORT` 변경 시 `DB_URL`의 포트도 맞춰야 합니다. DB 초기화 환경변수는 새 볼륨 생성 시 적용되므로 기존 볼륨의 사용자·비밀번호를 파일 수정만으로 바꿀 수는 없습니다.
+DB 이름은 `inventory`입니다. 두 호스트 포트는 127.0.0.1에만 공개합니다. 로컬 앱에서 `DB_PORT`를 변경하면 `DB_URL`의 포트도 맞춰야 합니다. Compose API는 내부 db:5432로 접속하므로 호스트 DB 포트 변경과 무관합니다. DB 초기화 환경변수는 새 볼륨 생성 시 적용되므로 기존 볼륨의 사용자·비밀번호를 파일 수정만으로 바꿀 수는 없습니다.
 
-직접 작성하고 신뢰하는 `.env`를 셸로 읽어 로컬 애플리케이션을 시작합니다. 또는 IDE 실행 설정에 같은 환경변수를 등록합니다.
+IDE·로컬 Java로 실행하려면 DB만 Compose로 실행합니다. 전체 Compose가 이미 실행 중이면 `docker compose stop api`로 API 포트 충돌을 피합니다. 직접 작성하고 신뢰하는 `.env`를 셸로 읽거나 IDE 실행 설정에 같은 환경변수를 등록합니다.
 
 ```bash
+docker compose up -d --wait db
 set -a
 source .env
 set +a
@@ -95,6 +95,12 @@ set +a
 ```
 
 Java 17이 기본으로 선택된 환경에서는 먼저 `JAVA_HOME`과 `PATH`를 설치된 JDK 21로 설정합니다. Java toolchain도 21로 고정했으며 JDK 자동 다운로드 플러그인은 사용하지 않습니다.
+
+전체 Compose 검증은 다음 명령으로 실행합니다. `.env`나 개발 DB 대신 예제 설정·임의 호스트 포트·고유 프로젝트와 새 볼륨을 사용합니다. 입출고·조회·오류 응답·재시작·컨테이너 재생성 후 데이터 보존을 검사하고, 종료 시 자신이 만든 컨테이너·네트워크·볼륨만 정리합니다.
+
+```bash
+./scripts/verify-compose.sh
+```
 
 ### 4. API 호출 확인
 
@@ -379,7 +385,49 @@ HTTP에서는 같은 신규 코드에 2개씩 8건 동시 입고하는 시나리
 
 경계값은 고정 시드 20261112의 BigInteger 모델로 256개 입출고 연산을 검증하는 단위 테스트 1건을 추가했습니다. 이 모델은 long 덧셈과 독립적으로 기대 수량을 계산하고 거부 시 수량·수정 시각 보존도 확인합니다. HTTP에서는 Long 최솟값 미만, 지수 표기 1e0, 배열·객체 수량, boolean·소수 상품 코드/이름, 짝이 맞지 않는 하위 서로게이트 거부를 보강했습니다. 상품 코드 64자와 Long.MAX_VALUE의 조합, 65자 입고·출고 거부도 확인합니다.
 
-남은 검증은 애플리케이션 이미지·전체 Compose, CI와 새 clone에서의 전체 실행입니다. 반복 테스트는 이 환경의 시나리오 검증이며 모든 실행 순서나 운영 성능을 보장하지 않습니다.
+5단계 완료 당시 남은 검증은 애플리케이션 이미지·전체 Compose, CI와 새 clone에서의 전체 실행이었습니다. 이미지·Compose 후속 결과는 아래 6단계 기록에 구분합니다. 반복 테스트는 이 환경의 시나리오 검증이며 모든 실행 순서나 운영 성능을 보장하지 않습니다.
+
+### 13. 이미지·CI 구성과 6단계 검증 기록 (2026-11-12)
+
+`Dockerfile`은 Temurin 21.0.13+9의 JDK 빌드 단계와 JRE 실행 단계를 분리합니다. 정확한 태그와 이미지 digest를 고정하고, Gradle Wrapper로 소스에서 `:inventory-api:bootJar`를 실행한 뒤 실행 JAR만 최종 이미지에 복사합니다. 호스트 빌드 결과나 JDK에 의존하지 않기 위한 구성입니다. `.dockerignore`는 빌드 결과·로컬 환경 파일·계획 문서를 제외합니다. 최초 빌드는 이미지·Gradle·의존성 다운로드가 필요하며 네트워크나 컴파일 오류가 있으면 실패합니다. 대안인 호스트 JAR 복사 방식은 빌드 환경을 따로 준비하고 산출물이 최신인지 관리해야 합니다.
+
+Compose는 `depends_on: condition: service_healthy`로 DB 준비를 기다린 다음 API를 시작합니다. API 연결 주소는 호스트의 localhost 대신 Compose 서비스명 `db`입니다. 이 순서만으로 Flyway·JPA 검증·HTTP 준비가 보장되지는 않으므로 검증 스크립트는 실제 조회 경로를 제한된 횟수로 확인합니다. 입출고 요청은 자동 재전송하지 않습니다. 실행 이미지는 JDK 대신 JRE만 사용하며 Java 소스 컴파일은 빌드 단계의 책임입니다.
+
+`.github/workflows/ci.yaml`은 main push·pull request·수동 실행에서 `ubuntu-24.04`, Temurin 21.0.13+9로 `./gradlew --no-daemon clean check`와 `./scripts/verify-compose.sh`를 순서대로 수행합니다. 두 명령 중 하나라도 실패하면 작업이 실패합니다. actions/checkout과 actions/setup-java는 커밋 SHA로 고정하고 저장소 권한은 읽기만 부여합니다. 수동 검증만 하는 대안보다 반복 실행 절차를 저장소에 남길 수 있지만, GitHub runner의 Docker·네트워크 상태에도 의존합니다. 원격 실행 결과와 로컬 검증 결과는 구분합니다.
+
+검증 호스트는 macOS ARM64, Docker Desktop 4.20.1 / Engine 24.0.2, Compose 2.18.1입니다. 앱 빌드·실행과 아래 전체 테스트는 Linux ARM64의 Temurin 21.0.13+9, PostgreSQL 16.14에서 수행했습니다. 앞선 단계의 호스트 Java 21.0.12.1과 패치 버전이 다릅니다. 새 라이브러리·업무 코드·DDL·트랜잭션 옵션은 추가하거나 변경하지 않았습니다.
+
+로컬 설정·계획서·기존 빌드 결과를 제외한 Git tree를 별도 임시 경로에 내보내 검증했습니다. 최초 이미지 빌드에서 이미지 내부 소스 컴파일과 실행 JAR 생성에 성공했고, 최종 소스 사본의 Compose 재검증에서는 동일 소스의 Docker 빌드 캐시를 사용했습니다. 캐시 없는 모든 재다운로드나 원격 clone을 검증했다는 뜻은 아닙니다.
+
+실제 실행한 핵심 명령은 다음과 같습니다. 테스트용 빌드 이미지를 별도로 내보낸 뒤 Docker 소켓을 연결해 Testcontainers가 PostgreSQL을 만들도록 했습니다. `TESTCONTAINERS_HOST_OVERRIDE`는 Docker Desktop의 테스트 컨테이너에서 호스트에 공개된 DB 포트로 접근하기 위한 검증용 값이며 앱 설정에 추가하지 않았습니다.
+
+```bash
+docker build --target build --tag deepfine-stage6-test-builder:trhwxf .
+docker run --name deepfine-stage6-test-trhwxf \
+  --volume /var/run/docker.sock:/var/run/docker.sock \
+  --env TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+  deepfine-stage6-test-builder:trhwxf \
+  ./gradlew --no-daemon clean check
+
+# Git 소스 사본에서 실행
+./scripts/verify-compose.sh
+```
+
+| 검증 | 결과 |
+| --- | --- |
+| Linux 전체 Gradle 검증 | BUILD SUCCESSFUL, 3분 37초, actionable task 17개 모두 실행 |
+| 단위 / PostgreSQL 통합 / 실제 HTTP E2E | 68 / 60 / 103건 성공, 합계 231건, 실패·오류·건너뜀 0건 |
+| 최종 실행 이미지 | JRE 21.0.13+9와 `/app/app.jar` 확인, `/workspace`·javac 부재 확인 |
+| Compose 초기 기동 | 새 격리 볼륨, PostgreSQL 16.14, Flyway V1 성공 기록과 실제 HTTP 준비 확인 |
+| Compose 업무·추적 | 입고 10 → 출고 3 → 조회 7, 초과 출고 409·INSUFFICIENT_STOCK, 요청 ID 헤더·오류 본문 일치 |
+| Compose 저장 상태 | 상품·재고 각 1행, 재고 7, 성공 이력 2행 및 이력 합계 7 |
+| Compose 데이터 보존 | DB·API 재시작 후와 `down` → `up` 재생성 후 같은 HTTP·DB 상태 확인 |
+| 검증 자원 정리 | 고유 프로젝트의 컨테이너·네트워크·볼륨 정리 성공, 기존 볼륨 3개 유지 확인 |
+| 정적 확인 | `bash -n`, workflow YAML 구문 파싱, Compose config 확인 성공. GitHub Actions 실행 검증과는 구분 |
+
+Compose의 초과 출고 검사는 변경 전 거부와 이력 부재를 확인합니다. 저장 실패 시 롤백은 별도의 PostgreSQL 통합·HTTP 테스트가 검증하며 두 시나리오를 혼동하지 않습니다. 테스트 결과 XML을 회수해 위 집계를 확인했고 검증용 테스트 컨테이너는 결과 회수 후 제거했습니다.
+
+원격 push를 하지 않았으므로 GitHub Actions의 Ubuntu 24.04 / AMD64 실행, 원격 저장소의 새 clone 실행은 미검증입니다. 로컬 Linux ARM64 통과를 원격 CI 통과로 주장하지 않습니다. 최종 문서 대조와 사용자의 설계 설명 확인은 다음 단계에 남아 있습니다.
 
 ## 입고 처리와 트랜잭션
 

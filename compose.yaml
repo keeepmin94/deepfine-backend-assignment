@@ -1,4 +1,18 @@
 services:
+    api:
+        build:
+            context: .
+        environment:
+            DB_URL: jdbc:postgresql://db:5432/inventory
+            POSTGRES_USER: ${POSTGRES_USER:-inventory}
+            POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+            SERVER_PORT: 8080
+            STOCK_LOCK_TIMEOUT_MS: ${STOCK_LOCK_TIMEOUT_MS:-3000}
+        ports:
+            - "127.0.0.1:${SERVER_PORT:-8080}:8080"
+        depends_on:
+            db:
+                condition: service_healthy
     db:
         image: postgres:16.14
         environment:
